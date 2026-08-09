@@ -42,30 +42,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: build + push by digest and per-arch tag
-        id: build
+      - name: build + push per-arch image
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          outputs: |
-            type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true
-            type=image,name=${{ env.IMAGE_NAME }},push=true,tag=${{ matrix.arch }}
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:${{ matrix.arch }}
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
-
-      - name: export digest
-        run: |
-          mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
-          echo "${{ matrix.arch }}" > /tmp/digests/.arch-${{ matrix.arch }}
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: digest-${{ matrix.arch }}
-          path: /tmp/digests/*
-          if-no-files-found: error
 
   merge:
     name: merge manifests
@@ -86,12 +71,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: digest-*
-          path: /tmp/digests
-          merge-multiple: true
-
       - name: image metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -105,10 +84,9 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: create + push multi-arch manifest
-        working-directory: /tmp/digests
         run: |
           tags=$(echo "${{ steps.meta.outputs.tags }}" | sed 's/^/-t /' | tr '\n' ' ')
-          refs=$(printf "${IMAGE_NAME}:%s " amd64 arm64)
+          refs="${IMAGE_NAME}:amd64 ${IMAGE_NAME}:arm64"
           echo "manifest sources: $refs"
           docker buildx imagetools create $tags $refs
 
