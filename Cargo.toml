@@ -1,0 +1,34 @@
+[package]
+name = "cap-server"
+version = "0.1.0"
+edition = "2024"
+description = "Lightweight CAP-compatible server for Cap Desktop"
+license = "AGPL-3.0"
+repository = "https://github.com/lawrence-millard/cap-rust"
+homepage = "https://github.com/lawrence-millard/cap-rust"
+keywords = ["cap", "screen-recording", "server"]
+categories = ["web-programming::http-server"]
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "migrate", "json", "chrono"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures-util = "0.3"
+tokio-util = { version = "0.7", features = ["io"] }
+http-body-util = "0.1"
+tower-http = { version = "0.6", features = ["cors", "trace", "set-header"] }
+
+[profile.release]
+lto = true
+strip = true
+opt-level = "z"
+codegen-units = 1
