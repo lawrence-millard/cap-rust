@@ -96,4 +96,7 @@ jobs:
       - name: make package public
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh api --method PATCH "/user/packages/container/${IMAGE_NAME##*/}" -f visibility=public --silent && echo "package set to public"
+        run: |
+          PACKAGE="${IMAGE_NAME#ghcr.io/}"
+          gh api --method PATCH "/user/packages/container/$PACKAGE" -f visibility=public --silent
+          echo "package set to public ($PACKAGE)"
