@@ -239,6 +239,7 @@ pub async fn multipart_initiate(
     verify_video_owned(&state, user.user_id(), &video_id).await?;
 
     let upload_id = uuid::Uuid::new_v4().to_string();
+    storage::touch_staging_activity(&state, &upload_id).await?;
 
     // mark video_uploads as multipart
     sqlx::query(
@@ -269,6 +270,8 @@ pub async fn multipart_presign_part(
     // derive video_id for ownership check
     let video_id = key.split('/').nth(1).unwrap_or("").to_string();
     verify_video_owned(&state, user.user_id(), &video_id).await?;
+
+    storage::touch_staging_activity(&state, &body.upload_id).await?;
 
     let part_key = format!("staging/{}/{}", body.upload_id, body.part_number);
     let url = state
@@ -396,47 +399,106 @@ pub async fn recording_complete(
         .and_then(|v| v.as_str())
         .unwrap_or("desktopMP4");
 
-    if source_type == "desktopSegments" {
-        // spawn muxing in the background
-        let state = state.clone();
-        let user_id = user.user_id().to_string();
-        let video_id = body.video_id.clone();
-        tokio::spawn(async move {
-            mux_segments(&state, &user_id, &video_id).await;
-        });
-        return Ok(Json(json!({ "success": true, "status": "queued" })));
+    if source_type != "desktopSegments" {
+        return Ok(Json(
+            json!({ "success": true, "status": "already-complete" }),
+        ));
     }
 
-    Ok(Json(
-        json!({ "success": true, "status": "already-complete" }),
-    ))
+    if state.mux_jobs.is_shutting_down() {
+        return Err(ApiError::Internal("server shutting down".into()));
+    }
+
+    // Atomically claim the video for muxing so concurrent complete calls
+    // cannot start duplicate work.
+    let claimed = sqlx::query_scalar::<_, String>(
+        "UPDATE videos SET mux_status = 'processing', mux_error = NULL \
+         WHERE id = $1 \
+           AND source->>'type' = 'desktopSegments' \
+           AND (mux_status IS NULL OR mux_status IN ('queued', 'error')) \
+         RETURNING id",
+    )
+    .bind(&body.video_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    if claimed.is_none() {
+        let status = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT mux_status FROM videos WHERE id = $1",
+        )
+        .bind(&body.video_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .flatten()
+        .unwrap_or_else(|| "already-complete".into());
+        return Ok(Json(json!({ "success": true, "status": status })));
+    }
+
+    let state_bg = state.clone();
+    let user_id = user.user_id().to_string();
+    let video_id = body.video_id.clone();
+    if !state.mux_jobs.try_spawn(video_id.clone(), async move {
+        mux_segments(&state_bg, &user_id, &video_id).await;
+    }) {
+        set_mux_error(&state, &body.video_id, "server shutting down").await;
+        return Err(ApiError::Internal("server shutting down".into()));
+    }
+
+    Ok(Json(json!({ "success": true, "status": "queued" })))
 }
 
 async fn mux_segments(state: &AppState, user_id: &str, video_id: &str) {
     let seg_dir_key = format!("{user_id}/{video_id}/segments");
     let seg_dir = match storage::resolve(state, &seg_dir_key) {
         Ok(d) => d,
-        Err(_) => return,
+        Err(_) => {
+            set_mux_error(state, video_id, "missing segments dir").await;
+            return;
+        }
     };
     let manifest_path = seg_dir.join("manifest.json");
     let manifest = match fs::read(&manifest_path).await {
         Ok(b) => match serde_json::from_slice::<Value>(&b) {
             Ok(v) => v,
-            Err(_) => return,
+            Err(_) => {
+                set_mux_error(state, video_id, "invalid manifest.json").await;
+                return;
+            }
         },
-        Err(_) => return,
+        Err(_) => {
+            set_mux_error(state, video_id, "missing manifest.json").await;
+            return;
+        }
     };
 
     let concat_ok = concat_mp4(state, user_id, video_id, &seg_dir, &manifest).await;
     if !concat_ok {
-        tracing::warn!("ffmpeg mux failed for video {video_id}");
+        set_mux_error(state, video_id, "ffmpeg mux failed").await;
         return;
     }
 
-    // update source to desktopMP4
+    // update source to desktopMP4 and mark complete
     let src = json!({"type": "desktopMP4"});
-    sqlx::query("UPDATE videos SET source = $1 WHERE id = $2")
-        .bind(&src)
+    if let Err(e) = sqlx::query(
+        "UPDATE videos SET source = $1, mux_status = 'complete', mux_error = NULL WHERE id = $2",
+    )
+    .bind(&src)
+    .bind(video_id)
+    .execute(&state.db)
+    .await
+    {
+        tracing::error!("mux: failed to mark video {video_id} complete: {e}");
+        // Leave the row re-claimable instead of stranding it in 'processing'.
+        set_mux_error(state, video_id, "mux completed but status update failed").await;
+    }
+}
+
+async fn set_mux_error(state: &AppState, video_id: &str, msg: &str) {
+    tracing::warn!("mux failed for video {video_id}: {msg}");
+    sqlx::query("UPDATE videos SET mux_status = 'error', mux_error = $1 WHERE id = $2")
+        .bind(msg)
         .bind(video_id)
         .execute(&state.db)
         .await

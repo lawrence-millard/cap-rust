@@ -193,6 +193,36 @@ pub async fn video_progress(
     Ok(Json(json!(true)))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoStatusQuery {
+    pub video_id: String,
+}
+
+/// GET /api/desktop/video/status?videoId=... — poll the background ffmpeg
+/// muxing state for Instant Mode (desktopSegments) recordings.
+/// Returns muxStatus: null (not segments), "processing", "complete", or "error".
+pub async fn video_status(
+    State(state): State<Arc<AppState>>,
+    user: CurrentUser,
+    Query(query): Query<VideoStatusQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let row = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+        "SELECT mux_status, mux_error FROM videos WHERE id = $1 AND owner_id = $2",
+    )
+    .bind(&query.video_id)
+    .bind(user.user_id())
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?
+    .ok_or(ApiError::NotFound)?;
+
+    Ok(Json(json!({
+        "muxStatus": row.0,
+        "muxError": row.1,
+    })))
+}
+
 pub async fn video_delete(
     State(state): State<Arc<AppState>>,
     user: CurrentUser,

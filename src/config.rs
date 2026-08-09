@@ -12,6 +12,7 @@ pub struct Config {
     pub sign_secret: String,
     pub ffmpeg_path: String,
     pub plan_upgraded: bool,
+    pub db_max_connections: u32,
 }
 
 impl Config {
@@ -49,6 +50,11 @@ impl Config {
             .map(|v| v != "0" && v.to_lowercase() != "false")
             .unwrap_or(true);
 
+        let db_max_connections = env::var("DB_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5);
+
         Config {
             database_url,
             web_url,
@@ -59,6 +65,7 @@ impl Config {
             sign_secret,
             ffmpeg_path,
             plan_upgraded,
+            db_max_connections,
         }
     }
 }

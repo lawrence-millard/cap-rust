@@ -7,6 +7,7 @@ use crate::state::AppState;
 pub mod auth;
 pub mod changelog;
 pub mod desktop;
+pub mod health;
 pub mod media;
 pub mod playlist;
 pub mod session;
@@ -15,6 +16,7 @@ pub mod upload;
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
+        .route("/health", get(health::health))
         .route("/", get(share::blank))
         .route("/s/{video_id}", get(share::video))
         .route("/media/{*key}", get(media::get))
@@ -38,6 +40,7 @@ fn api_router() -> Router<Arc<AppState>> {
             get(desktop::storage_integrations),
         )
         .route("/desktop/video/create", get(desktop::video_create))
+        .route("/desktop/video/status", get(desktop::video_status))
         .route("/desktop/video/delete", delete(desktop::video_delete))
         .route("/desktop/video/progress", post(desktop::video_progress))
         .route("/desktop/feedback", post(desktop::feedback))

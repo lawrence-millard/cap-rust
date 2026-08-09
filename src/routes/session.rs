@@ -45,12 +45,6 @@ pub async fn request_post(
     axum::extract::Form(form): axum::extract::Form<SessionForm>,
 ) -> Result<axum::response::Response, ApiError> {
     let username = form.username.trim().to_string();
-    if username.len() < 3 {
-        return Err(ApiError::BadRequest("username too short".into()));
-    }
-    if form.password.len() < 8 {
-        return Err(ApiError::BadRequest("password too short".into()));
-    }
 
     let user_id = match form.action.as_str() {
         "register" => {
@@ -66,7 +60,7 @@ pub async fn request_post(
                 )
                     .into_response());
             }
-            match create_user(&state, &username, &form.password).await {
+            match crate::auth::register_user(&state.db, &username, &form.password).await {
                 Ok(uid) => uid,
                 Err(e) => {
                     return Ok((
@@ -82,7 +76,7 @@ pub async fn request_post(
                 }
             }
         }
-        "login" => match authenticate(&state, &username, &form.password).await {
+        "login" => match crate::auth::login_user(&state.db, &username, &form.password).await {
             Ok(uid) => uid,
             Err(_) => {
                 return Ok((
@@ -121,54 +115,6 @@ pub async fn request_post(
 
     let url = format!("cap-desktop://signin?{params}");
     Ok(Redirect::to(&url).into_response())
-}
-
-async fn create_user(state: &AppState, username: &str, password: &str) -> Result<String, ApiError> {
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE username = $1)")
-        .bind(username)
-        .fetch_one(&state.db)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-    if exists {
-        return Err(ApiError::BadRequest(
-            "username already taken; try logging in instead".into(),
-        ));
-    }
-
-    let user_id = uuid::Uuid::new_v4().to_string();
-    let password_hash = crate::auth::hash_password(password)?;
-
-    sqlx::query("INSERT INTO users (id, name, username, password_hash) VALUES ($1, $2, $3, $4)")
-        .bind(&user_id)
-        .bind(username)
-        .bind(username)
-        .bind(&password_hash)
-        .execute(&state.db)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    Ok(user_id)
-}
-
-async fn authenticate(
-    state: &AppState,
-    username: &str,
-    password: &str,
-) -> Result<String, ApiError> {
-    let row = sqlx::query_as::<_, (String, Option<String>)>(
-        "SELECT id, password_hash FROM users WHERE username = $1",
-    )
-    .bind(username)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| ApiError::Internal(e.to_string()))?
-    .ok_or(ApiError::Unauthorized)?;
-
-    let hash = row.1.ok_or(ApiError::Unauthorized)?;
-    if !crate::auth::verify_password(password, &hash) {
-        return Err(ApiError::Unauthorized);
-    }
-    Ok(row.0)
 }
 
 fn render_session_page(

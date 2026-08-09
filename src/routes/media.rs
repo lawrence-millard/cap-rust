@@ -44,6 +44,7 @@ pub async fn put(
         return Err(ApiError::Unauthorized);
     }
     storage::ensure_parent(&state, &key).await?;
+    storage::touch_staging_activity_for_key(&state, &key).await;
     let path = storage::resolve(&state, &key)?;
 
     let mut file = fs::File::create(&path)
@@ -61,6 +62,9 @@ pub async fn put(
     file.flush()
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    // Refresh again after the write so long part uploads keep the heartbeat fresh.
+    storage::touch_staging_activity_for_key(&state, &key).await;
 
     Ok(StatusCode::OK)
 }
@@ -108,17 +112,43 @@ async fn serve_file_with_range(
     // Parse Range header (single range only)
     let range_header = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
 
-    let (start, end) = if let Some(range) = range_header {
-        if let Some(range) = range.strip_prefix("bytes=") {
-            parse_range(range, file_size).unwrap_or((None, None))
-        } else {
-            (None, None)
-        }
-    } else {
-        (None, None)
-    };
+    // Empty files cannot satisfy any byte range; return 416 before parse_range
+    // so suffix forms cannot underflow on `file_size - 1`.
+    if file_size == 0 && range_header.is_some_and(|r| r.starts_with("bytes=")) {
+        return Ok(axum::response::Response::builder()
+            .status(StatusCode::RANGE_NOT_SATISFIABLE)
+            .header(header::CONTENT_RANGE, "bytes */0")
+            .body(Body::empty())?);
+    }
+
+    // `requested_range` is None when no valid "bytes=" Range was sent;
+    // Some(parse result) otherwise. We keep the two apart so a malformed or
+    // unsatisfiable range can be answered with 416 instead of silently 200.
+    let requested_range = range_header
+        .filter(|r| r.starts_with("bytes="))
+        .map(|r| parse_range(&r[6..], file_size));
 
     let mut resp_builder = axum::response::Response::builder();
+
+    let range_requested = requested_range.is_some();
+
+    // 416 for malformed or unsatisfiable ranges (RFC 9110 §14.2)
+    if matches!(requested_range, Some(None)) {
+        return Ok(resp_builder
+            .status(StatusCode::RANGE_NOT_SATISFIABLE)
+            .header(header::CONTENT_RANGE, format!("bytes */{file_size}"))
+            .body(Body::empty())?);
+    }
+
+    let (start, end) = match requested_range {
+        None => (None, None),
+        Some(Some((s, e))) => match (s, e) {
+            // open-ended "bytes=start-" => to end of file
+            (Some(s), None) if s < file_size => (Some(s), Some(file_size - 1)),
+            other => other,
+        },
+        Some(None) => unreachable!(),
+    };
 
     match (start, end) {
         (Some(s), Some(e)) if s <= e && e < file_size => {
@@ -141,6 +171,10 @@ async fn serve_file_with_range(
                 .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable");
             Ok(resp_builder.body(stream)?)
         }
+        _ if range_requested => Ok(resp_builder
+            .status(StatusCode::RANGE_NOT_SATISFIABLE)
+            .header(header::CONTENT_RANGE, format!("bytes */{file_size}"))
+            .body(Body::empty())?),
         _ => {
             let file = fs::File::open(path)
                 .await
@@ -160,6 +194,9 @@ async fn serve_file_with_range(
 
 /// Parse "start-end", "start-", "-suffix" forms. Returns (start, end).
 fn parse_range(range: &str, file_size: u64) -> Option<(Option<u64>, Option<u64>)> {
+    if file_size == 0 {
+        return None;
+    }
     let (start, end) = range.split_once('-')?;
     let start = start.trim();
     let end = end.trim();
@@ -183,5 +220,86 @@ fn parse_range(range: &str, file_size: u64) -> Option<(Option<u64>, Option<u64>)
 impl From<axum::http::Error> for ApiError {
     fn from(e: axum::http::Error) -> Self {
         ApiError::Internal(e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_range_full() {
+        assert_eq!(parse_range("0-99", 200), Some((Some(0), Some(99))));
+    }
+
+    #[test]
+    fn parse_range_open_ended() {
+        assert_eq!(parse_range("50-", 200), Some((Some(50), None)));
+    }
+
+    #[test]
+    fn parse_range_suffix() {
+        assert_eq!(parse_range("-50", 200), Some((Some(150), Some(199))));
+    }
+
+    #[test]
+    fn parse_range_suffix_exact_file() {
+        assert_eq!(parse_range("-200", 200), Some((Some(0), Some(199))));
+    }
+
+    #[test]
+    fn parse_range_suffix_overflow() {
+        // suffix larger than file clamps to start of file
+        assert_eq!(parse_range("-500", 200), Some((Some(0), Some(199))));
+    }
+
+    #[test]
+    fn parse_range_suffix_zero_is_none() {
+        assert_eq!(parse_range("-0", 200), None);
+    }
+
+    #[test]
+    fn parse_range_suffix_on_empty_file_is_none() {
+        assert_eq!(parse_range("-5", 0), None);
+    }
+
+    #[test]
+    fn parse_range_start_beyond_file() {
+        assert_eq!(parse_range("500-600", 200), Some((Some(500), Some(600))));
+    }
+
+    #[test]
+    fn parse_range_reversed() {
+        assert_eq!(parse_range("100-50", 200), Some((Some(100), Some(50))));
+    }
+
+    #[test]
+    fn parse_range_empty() {
+        assert_eq!(parse_range("", 200), None);
+    }
+
+    #[test]
+    fn parse_range_only_dash() {
+        assert_eq!(parse_range("-", 200), None);
+    }
+
+    #[test]
+    fn parse_range_non_numeric_start() {
+        assert_eq!(parse_range("abc-50", 200), None);
+    }
+
+    #[test]
+    fn parse_range_non_numeric_end() {
+        assert_eq!(parse_range("50-abc", 200), None);
+    }
+
+    #[test]
+    fn parse_range_just_start() {
+        assert_eq!(parse_range("0-", 200), Some((Some(0), None)));
+    }
+
+    #[test]
+    fn parse_range_trim_whitespace() {
+        assert_eq!(parse_range(" 50 - 100 ", 200), Some((Some(50), Some(100))));
     }
 }

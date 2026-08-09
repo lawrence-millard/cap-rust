@@ -147,6 +147,74 @@ pub async fn lookup_user(db: &PgPool, token: &str) -> Result<User, ApiError> {
     })
 }
 
+/// Validate + create a user account. Usernames are trimmed; must be 3-32
+/// chars; passwords must be at least 8 chars.
+/// ponytail: usernames are case-sensitive (stored as given). To allow "Bob"/"bob"
+/// collisions we'd need a lowercase normalization migration; add when accounts
+/// matter enough to care.
+pub async fn register_user(
+    db: &PgPool,
+    username: &str,
+    password: &str,
+) -> Result<String, ApiError> {
+    let username = username.trim();
+    if !(3..=32).contains(&username.len()) {
+        return Err(ApiError::BadRequest(
+            "username must be 3-32 characters".into(),
+        ));
+    }
+    if password.len() < 8 {
+        return Err(ApiError::BadRequest(
+            "password must be at least 8 characters".into(),
+        ));
+    }
+
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE username = $1)")
+        .bind(username)
+        .fetch_one(db)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    if exists {
+        return Err(ApiError::BadRequest(
+            "username already taken; try logging in instead".into(),
+        ));
+    }
+
+    let user_id = uuid::Uuid::new_v4().to_string();
+    let password_hash = hash_password(password)?;
+
+    sqlx::query("INSERT INTO users (id, name, username, password_hash) VALUES ($1, $2, $3, $4)")
+        .bind(&user_id)
+        .bind(username)
+        .bind(username)
+        .bind(&password_hash)
+        .execute(db)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(user_id)
+}
+
+/// Authenticate username/password against the stored Argon2 hash.
+pub async fn login_user(db: &PgPool, username: &str, password: &str) -> Result<String, ApiError> {
+    let username = username.trim();
+
+    let row = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT id, password_hash FROM users WHERE username = $1",
+    )
+    .bind(username)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?
+    .ok_or(ApiError::Unauthorized)?;
+
+    let hash = row.1.ok_or(ApiError::Unauthorized)?;
+    if !verify_password(password, &hash) {
+        return Err(ApiError::Unauthorized);
+    }
+    Ok(row.0)
+}
+
 impl FromRef<Arc<AppState>> for AppState {
     fn from_ref(input: &Arc<AppState>) -> Self {
         (**input).clone()

@@ -16,7 +16,9 @@ No Next.js, no Node, no MySQL, no separate media server. Metadata lives in Neon 
 - `video/create`, `video/progress`, `video/delete`
 - Uploads: single-part signed PUT, signed batch (Instant Mode segments), multipart initiate/presign-part/complete/abort, `recording-complete`
 - Playback: `/api/playlist` (mp4 + HLS segments), signed `/media` with `Range` support, share pages at `/s/{videoId}`
-- Instant Mode (desktopSegments) muxed to `result.mp4` via ffmpeg when it completes
+- Instant Mode (desktopSegments) muxed to `result.mp4` via ffmpeg in the background; poll progress via `video/status`
+- `GET /health` reports liveness + DB reachability (200 ok / 503 degraded)
+- Graceful shutdown on SIGINT/SIGTERM; abandoned multipart upload staging dirs are swept hourly
 
 Not implemented (out of scope for a simple multi-user server): Stripe, email, comments, orgs/teams, Google Drive, transcription, web dashboard.
 
@@ -58,6 +60,7 @@ openssl rand -hex 32
 | `SIGN_SECRET` | yes | — | Long random string (min 16 chars); signs upload/playback URLs and JWT tokens. Required — server refuses to start without it. |
 | `CAP_SIGNUPS` | no | `true` | If `false`, registration is disabled — only existing accounts can log in from the desktop connect page. |
 | `JWT_TTL` | no | `2592000` | JWT token lifetime in seconds (default 30 days). |
+| `DB_MAX_CONNECTIONS` | no | `5` | Postgres connection pool size. |
 | `STORAGE_DIR` | no | `./data` | Where recordings are stored |
 | `PORT` | no | `8080` | HTTP listen port |
 | `FFMPEG_PATH` | no | `ffmpeg` | ffmpeg binary for Instant Mode muxing |
