@@ -92,10 +92,3 @@ jobs:
 
       - name: verify
         run: docker buildx imagetools inspect "$(echo "${{ steps.meta.outputs.tags }}" | head -1)"
-
-      - name: make package public
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh api --method PATCH "/user/packages/container/${{ github.event.repository.name }}" -f visibility=public --silent
-          echo "package set to public"
