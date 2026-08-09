@@ -21,8 +21,10 @@ jobs:
       matrix:
         include:
           - platform: linux/amd64
+            arch: amd64
             runner: ubuntu-latest
           - platform: linux/arm64
+            arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -58,7 +60,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: digest-${{ matrix.platform }}
+          name: digest-${{ matrix.arch }}
           path: /tmp/digests/*
           if-no-files-found: error
 
