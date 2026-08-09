@@ -92,3 +92,6 @@ jobs:
 
       - name: verify
         run: docker buildx imagetools inspect "$(echo "${{ steps.meta.outputs.tags }}" | head -1)"
+
+      - name: make package public
+        run: gh api --method PATCH "/user/packages/container/${IMAGE_NAME##*/}" -f visibility=public --silent && echo "package set to public"
