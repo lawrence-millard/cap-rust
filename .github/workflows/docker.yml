@@ -42,13 +42,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: build + push by digest
+      - name: build + push by digest and per-arch tag
         id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true
+          outputs: |
+            type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true
+            type=image,name=${{ env.IMAGE_NAME }},push=true,tag=${{ matrix.arch }}
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
 
@@ -57,6 +59,7 @@ jobs:
           mkdir -p /tmp/digests
           digest="${{ steps.build.outputs.digest }}"
           touch "/tmp/digests/${digest#sha256:}"
+          echo "${{ matrix.arch }}" > /tmp/digests/.arch-${{ matrix.arch }}
 
       - uses: actions/upload-artifact@v4
         with:
@@ -105,7 +108,7 @@ jobs:
         working-directory: /tmp/digests
         run: |
           tags=$(echo "${{ steps.meta.outputs.tags }}" | sed 's/^/-t /' | tr '\n' ' ')
-          refs=$(printf "${IMAGE_NAME}@sha256:%s " *)
+          refs=$(printf "${IMAGE_NAME}:%s " amd64 arm64)
           echo "manifest sources: $refs"
           docker buildx imagetools create $tags $refs
 
