@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::state::AppState;
 
+pub mod auth;
 pub mod changelog;
 pub mod desktop;
 pub mod media;
@@ -26,6 +27,8 @@ fn api_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/desktop/session/request", get(session::request))
         .route("/desktop/session/request", post(session::request_post))
+        .route("/auth/register", post(auth::register))
+        .route("/auth/login", post(auth::login))
         .route("/desktop/user/profile", get(desktop::user_profile))
         .route("/desktop/plan", get(desktop::plan))
         .route("/desktop/organizations", get(desktop::organizations))

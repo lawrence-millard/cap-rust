@@ -1,6 +1,11 @@
+use argon2::Argon2;
+use argon2::password_hash::{
+    PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng,
+};
 use axum::extract::{FromRef, FromRequestParts};
 use axum::http::request::Parts;
-use serde::Deserialize;
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::sync::Arc;
 
@@ -12,6 +17,7 @@ pub struct User {
     pub id: String,
     pub name: Option<String>,
     pub email: Option<String>,
+    pub username: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -21,6 +27,12 @@ impl CurrentUser {
     pub fn user_id(&self) -> &str {
         &self.0.id
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Claims {
+    sub: String,
+    exp: usize,
 }
 
 impl<S> FromRequestParts<S> for CurrentUser
@@ -39,12 +51,73 @@ where
             .and_then(|v| v.strip_prefix("Bearer "))
             .ok_or(ApiError::Unauthorized)?;
 
-        let user = lookup_user(&app_state.db, bearer)
-            .await
-            .map_err(|_| ApiError::Unauthorized)?;
-
-        Ok(CurrentUser(user))
+        // First try JWT (user-facing auth), then fall back to a desktop API key.
+        if let Some(user) = lookup_user_by_jwt(&app_state, bearer).await {
+            return Ok(CurrentUser(user));
+        }
+        if let Ok(user) = lookup_user(&app_state.db, bearer).await {
+            return Ok(CurrentUser(user));
+        }
+        Err(ApiError::Unauthorized)
     }
+}
+
+/// Hash a password with Argon2. Returns the encoded PHC string.
+pub fn hash_password(password: &str) -> Result<String, ApiError> {
+    let salt = SaltString::generate(&mut OsRng);
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|h| h.to_string())
+        .map_err(|e| ApiError::Internal(e.to_string()))
+}
+
+/// Verify a password against an Argon2 PHC string.
+pub fn verify_password(password: &str, hash: &str) -> bool {
+    match PasswordHash::new(hash) {
+        Ok(parsed) => Argon2::default()
+            .verify_password(password.as_bytes(), &parsed)
+            .is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Mint a JWT for a user id. Uses SIGN_SECRET as the HMAC key.
+pub fn issue_jwt(app_state: &AppState, user_id: &str) -> Result<String, ApiError> {
+    let exp = crate::sign::now() + app_state.config.jwt_ttl_secs;
+    let claims = Claims {
+        sub: user_id.to_string(),
+        exp: exp as usize,
+    };
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(app_state.config.sign_secret.as_bytes()),
+    )
+    .map_err(|e| ApiError::Internal(e.to_string()))
+}
+
+async fn lookup_user_by_jwt(app_state: &AppState, token: &str) -> Option<User> {
+    let data = decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(app_state.config.sign_secret.as_bytes()),
+        &Validation::new(Algorithm::HS256),
+    )
+    .ok()?;
+    let user_id = data.claims.sub;
+    let pool = app_state.db.clone();
+    let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(
+        "SELECT id, name, email, username FROM users WHERE id = $1",
+    )
+    .bind(&user_id)
+    .fetch_optional(&pool)
+    .await
+    .ok()?;
+    row.map(|(id, name, email, username)| User {
+        id,
+        name,
+        email,
+        username,
+    })
 }
 
 pub async fn lookup_user(db: &PgPool, token: &str) -> Result<User, ApiError> {
@@ -57,8 +130,8 @@ pub async fn lookup_user(db: &PgPool, token: &str) -> Result<User, ApiError> {
 
     let user_id = user_id.ok_or(ApiError::Unauthorized)?;
 
-    let row = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
-        "SELECT id, name, email FROM users WHERE id = $1",
+    let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(
+        "SELECT id, name, email, username FROM users WHERE id = $1",
     )
     .bind(&user_id)
     .fetch_optional(db)
@@ -70,29 +143,7 @@ pub async fn lookup_user(db: &PgPool, token: &str) -> Result<User, ApiError> {
         id: row.0,
         name: row.1,
         email: row.2,
-    })
-}
-
-pub async fn ensure_user(
-    db: &PgPool,
-    user_id: &str,
-    name: &str,
-    email: Option<&str>,
-) -> Result<User, ApiError> {
-    sqlx::query(
-        "INSERT INTO users (id, name, email) VALUES ($1, $2, $3) ON CONFLICT (id) DO UPDATE SET name = $2",
-    )
-    .bind(user_id)
-    .bind(name)
-    .bind(email)
-    .execute(db)
-    .await
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    Ok(User {
-        id: user_id.to_string(),
-        name: Some(name.to_string()),
-        email: email.map(|s| s.to_string()),
+        username: row.3,
     })
 }
 

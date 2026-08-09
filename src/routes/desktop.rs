@@ -45,6 +45,7 @@ pub async fn user_profile(user: CurrentUser) -> Json<Value> {
     Json(json!({
         "name": user.0.name,
         "email": user.0.email,
+        "username": user.0.username,
         "imageUrl": null,
     }))
 }

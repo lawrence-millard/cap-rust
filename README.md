@@ -10,14 +10,15 @@ No Next.js, no Node, no MySQL, no separate media server. Metadata lives in Neon 
 
 ## What works
 
-- Desktop sign-in handshake (`/api/desktop/session/request`) with optional passcode gate → API key → loopback redirect
+- Desktop sign-in handshake (`/api/desktop/session/request`) with username/password login or account creation → API key → loopback redirect
+- `POST /api/auth/register` and `POST /api/auth/login` return a JWT for programmatic access
 - `user/profile`, `plan`, `organizations`, `s3/config/get`, `storage/integrations`, `changelog/status`
 - `video/create`, `video/progress`, `video/delete`
 - Uploads: single-part signed PUT, signed batch (Instant Mode segments), multipart initiate/presign-part/complete/abort, `recording-complete`
 - Playback: `/api/playlist` (mp4 + HLS segments), signed `/media` with `Range` support, share pages at `/s/{videoId}`
 - Instant Mode (desktopSegments) muxed to `result.mp4` via ffmpeg when it completes
 
-Not implemented (out of scope for one user): Stripe, email, comments, orgs/teams, Google Drive, transcription, web dashboard.
+Not implemented (out of scope for a simple multi-user server): Stripe, email, comments, orgs/teams, Google Drive, transcription, web dashboard.
 
 ## Quick start
 
@@ -30,7 +31,7 @@ docker pull ghcr.io/lawrence-millard/cap-rust:latest
 Or build from source:
 
 ```bash
-cp .env.example .env   # edit DATABASE_URL, WEB_URL, SIGN_SECRET, CAP_PASSCODE
+cp .env.example .env   # edit DATABASE_URL, WEB_URL, SIGN_SECRET
 cargo build --release
 ./target/release/cap-server
 ```
@@ -52,10 +53,11 @@ openssl rand -hex 32
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
-| `DATABASE_URL` | yes | — | Neon / Postgres connection string |
+| `DATABASE_URL` | yes | — | Postgres connection string |
 | `WEB_URL` | yes | — | Public URL of this server, e.g. `https://cap.example.com` |
-| `SIGN_SECRET` | yes | — | Long random string (min 16 chars); signs upload/playback URLs. Required — server refuses to start without it. |
-| `CAP_PASSCODE` | no | — | If set, desktop sign-in requires this passcode. If empty, **anyone** who can reach the server can authorize a device — only leave empty on a private network. |
+| `SIGN_SECRET` | yes | — | Long random string (min 16 chars); signs upload/playback URLs and JWT tokens. Required — server refuses to start without it. |
+| `CAP_SIGNUPS` | no | `true` | If `false`, registration is disabled — only existing accounts can log in from the desktop connect page. |
+| `JWT_TTL` | no | `2592000` | JWT token lifetime in seconds (default 30 days). |
 | `STORAGE_DIR` | no | `./data` | Where recordings are stored |
 | `PORT` | no | `8080` | HTTP listen port |
 | `FFMPEG_PATH` | no | `ffmpeg` | ffmpeg binary for Instant Mode muxing |
@@ -74,7 +76,7 @@ Caddyfile            # automatic HTTPS for your domain
 2. Set the env vars in your shell or `.env`.
 3. `docker compose up -d && caddy start`
 4. In Cap Desktop → Settings → Cap Server URL → your `https://domain`.
-5. Sign in — enter the passcode when prompted.
+5. The connect page opens in your browser — create an account or log in.
 
 The prebuilt release binaries and Docker image both need `ffmpeg` on `PATH` for Instant Mode muxing (already included in the Docker image; install it yourself when using the bare binary).
 
@@ -91,18 +93,19 @@ cap.example.com {
 Simulates the exact requests Cap Desktop makes (shapes from `packages/web-api-contract/src/desktop.ts` and `apps/desktop/src-tauri/src/api.rs`):
 
 ```bash
-DATABASE_URL=... WEB_URL=... SIGN_SECRET=... CAP_PASSCODE=test123 STORAGE_DIR=./data ./target/debug/cap-server &
+DATABASE_URL=... WEB_URL=... SIGN_SECRET=... CAP_SIGNUPS=true STORAGE_DIR=./data ./target/debug/cap-server &
 bash scripts/contract-test.sh
 ```
 
 ## Security
 
-- Always set a strong `SIGN_SECRET` and keep `CAP_PASSCODE` set on any internet-facing instance.
-- Serve over HTTPS (Caddy example below) — signed URLs and API keys are bearer credentials.
+- Always set a strong `SIGN_SECRET`. Set `CAP_SIGNUPS=false` on any internet-facing instance where you don't want open registration.
+- Serve over HTTPS (Caddy example below) — signed URLs, API keys, and JWTs are bearer credentials.
+- Passwords are hashed with Argon2; API keys and JWTs are per-user.
 - The Docker image runs as a non-root user; recordings live in the `cap-data` volume.
 
 ## Notes
 
 - The Neon `channel_binding=require` connection parameter is stripped automatically.
-- Recordings are stored under `{STORAGE_DIR}/{user}/{video}/…` mirroring Cap's S3 keys (`result.mp4`, `raw-upload.mp4`, `segments/…`).
-- Share links are only served for videos where `public` is true (the default). All recordings from a single-user server are owned by the built-in user `u_single_user`.
+- Recordings are stored under `{STORAGE_DIR}/{user}/{video}/…` mirroring Cap's S3 keys (`result.mp4`, `raw-upload.mp4`, `segments/…`), so each user's recordings are isolated on disk.
+- Share links are only served for videos where `public` is true (the default). Recordings uploaded before multi-user support are owned by the legacy built-in user `u_single_user`.

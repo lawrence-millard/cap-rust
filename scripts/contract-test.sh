@@ -5,7 +5,6 @@
 set -euo pipefail
 
 BASE="${BASE:-http://localhost:8080}"
-PASSCODE="${PASSCODE:-test123}"
 PASS=0
 FAIL=0
 
@@ -36,30 +35,54 @@ check() {
 
 echo "== auth =="
 
-# GET session/request should serve the passcode page
+# GET session/request should serve the login/register page
 CODE=$(curl -s -o /tmp/body -w "%{http_code}" "$BASE/api/desktop/session/request?type=api_key")
 check "session/request GET" "200" "$CODE"
-grep -q "Connect Cap Desktop" /tmp/body && check "passcode page content" "found" "found" || check "passcode page content" "found" "missing"
+grep -q "Connect Cap Desktop" /tmp/body && check "session page content" "found" "found" || check "session page content" "found" "missing"
 
-# Wrong passcode rejected
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/desktop/session/request" -d "passcode=wrong&port=4321")
-check "wrong passcode" "401" "$CODE"
-
-# Correct passcode -> redirect to localhost with api_key
-LOCATION=$(curl -s -D - -o /dev/null -X POST "$BASE/api/desktop/session/request" -d "passcode=$PASSCODE&port=4321" | tr -d '\r' | grep -i '^location:' | sed 's/^[Ll]ocation: //')
+# Register a user via the desktop session form -> redirect with api_key
+LOCATION=$(curl -s -D - -o /dev/null -X POST "$BASE/api/desktop/session/request" \
+  -d "action=register&username=contract-test&password=test1234&port=9999" | tr -d '\r' | grep -i '^location:' | sed 's/^[Ll]ocation: //')
 echo "  location: $LOCATION"
 case "$LOCATION" in
-  "http://127.0.0.1:4321/?type=api_key&api_key="*) check "api_key redirect" "loopback+type" "loopback+type" ;;
-  *) check "api_key redirect" "loopback+type" "$LOCATION" ;;
+  "http://127.0.0.1:9999/?type=api_key&api_key="*) check "register redirect" "loopback+type" "loopback+type" ;;
+  *) check "register redirect" "loopback+type" "$LOCATION" ;;
 esac
 API_KEY=$(echo "$LOCATION" | sed 's/.*api_key=//;s/&.*//')
+USER_ID=$(echo "$LOCATION" | sed 's/.*user_id=//')
+echo "  user_id: $USER_ID"
 
-# No passcode configured => auto issue. Test separately by hitting with no passcode body.
+# /api/auth/register JSON endpoint
+RESP=$(curl -s -X POST -H "Content-Type: application/json" \
+  -d '{"username":"json-test","password":"jsonpw1234"}' \
+  "$BASE/api/auth/register")
+check "json register has token" "token" "$(echo "$RESP" | json_get token 2>/dev/null || echo "missing")"
+JSON_TOKEN=$(echo "$RESP" | json_get token)
+
+# /api/auth/login JSON endpoint
+RESP=$(curl -s -X POST -H "Content-Type: application/json" \
+  -d '{"username":"contract-test","password":"test1234"}' \
+  "$BASE/api/auth/login")
+check "json login has token" "token" "$(echo "$RESP" | json_get token 2>/dev/null || echo "missing")"
+
+# Invalid credentials rejected
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" \
+  -d '{"username":"contract-test","password":"wrongpass"}' \
+  "$BASE/api/auth/login")
+check "bad login" "401" "$CODE"
+
+# Duplicate username rejected
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" \
+  -d '{"username":"contract-test","password":"test1234"}' \
+  "$BASE/api/auth/register")
+check "duplicate register" "400" "$CODE"
+
 echo ""
 echo "== desktop endpoints =="
 
 RESP=$(curl -s -H "Authorization: Bearer $API_KEY" "$BASE/api/desktop/user/profile")
 [[ "$RESP" == *'"name"'* ]] && check "profile" "json" "json" || check "profile" "json" "$RESP"
+[[ "$RESP" == *'"username"'* ]] && check "profile has username" "json" "json" || check "profile has username" "json" "missing"
 
 RESP=$(curl -s -H "Authorization: Bearer $API_KEY" "$BASE/api/desktop/plan")
 check "plan.upgraded" "true" "$(echo "$RESP" | json_get upgraded)"
@@ -78,13 +101,18 @@ check "storage activeProvider" "s3" "$(echo "$RESP" | json_get activeProvider)"
 CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer bad-key" "$BASE/api/desktop/plan")
 check "bad auth" "401" "$CODE"
 
+# JWT token also works for API endpoints
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $JSON_TOKEN" "$BASE/api/desktop/plan")
+check "jwt auth works" "200" "$CODE"
+
 echo ""
 echo "== video create =="
 
 RESP=$(curl -s -H "Authorization: Bearer $API_KEY" "$BASE/api/desktop/video/create?recordingMode=desktopMP4&name=contract-test")
 VIDEO_ID=$(echo "$RESP" | json_get id)
 check "video create id" "1" "$(echo -n "$VIDEO_ID" | grep -cE '^[0-9a-f]{8}-' | tr -d ' ')"
-check "video create user_id" "u_single_user" "$(echo "$RESP" | json_get user_id)"
+# user_id should be the registered user's uuid, not the legacy u_single_user
+[[ "$USER_ID" == "$(echo "$RESP" | json_get user_id)" ]] && check "video create user_id" "matches" "matches" || check "video create user_id" "matches" "mismatch"
 
 echo ""
 echo "== single-part upload (signed) =="

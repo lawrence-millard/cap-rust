@@ -37,7 +37,7 @@ async fn main() {
         .await
         .expect("migrations failed");
 
-    // ensure default user exists
+    // ensure legacy default user exists (pre-multi-user recordings are owned by it)
     sqlx::query(
         "INSERT INTO users (id, name, email) VALUES ('u_single_user', 'Owner', NULL)
          ON CONFLICT (id) DO NOTHING",

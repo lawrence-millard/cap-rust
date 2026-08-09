@@ -5,7 +5,8 @@ use std::path::PathBuf;
 pub struct Config {
     pub database_url: String,
     pub web_url: String,
-    pub cap_passcode: Option<String>,
+    pub cap_signups: bool,
+    pub jwt_ttl_secs: i64,
     pub storage_dir: PathBuf,
     pub port: u16,
     pub sign_secret: String,
@@ -35,24 +36,29 @@ impl Config {
             "SIGN_SECRET must be at least 16 characters; use `openssl rand -hex 32`"
         );
 
-        let cap_passcode = env::var("CAP_PASSCODE").ok().filter(|p| !p.is_empty());
-        if cap_passcode.is_none() {
-            tracing::warn!(
-                "CAP_PASSCODE is not set: ANY visitor can authorize a device and get an API key. Set it unless this server is private."
-            );
-        }
+        let cap_signups = env::var("CAP_SIGNUPS")
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(true);
+
+        let jwt_ttl_secs = env::var("JWT_TTL")
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(30 * 86400);
+
+        let plan_upgraded = env::var("CAP_PLAN_UPGRADED")
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(true);
 
         Config {
             database_url,
             web_url,
-            cap_passcode,
+            cap_signups,
+            jwt_ttl_secs,
             storage_dir: PathBuf::from(storage_dir),
             port,
             sign_secret,
             ffmpeg_path,
-            plan_upgraded: env::var("CAP_PLAN_UPGRADED")
-                .map(|v| v != "0" && v.to_lowercase() != "false")
-                .unwrap_or(true),
+            plan_upgraded,
         }
     }
 }
