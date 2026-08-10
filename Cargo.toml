@@ -1,6 +1,6 @@
 [package]
 name = "cap-server"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 description = "Lightweight CAP-compatible server for Cap Desktop"
 license = "AGPL-3.0"

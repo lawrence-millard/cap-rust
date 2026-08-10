@@ -3,6 +3,13 @@
 All notable changes are documented here. This project follows Semantic
 Versioning.
 
+## [1.0.1] - 2026-08-10
+
+### Fixed
+
+- Cap Desktop contract-test assertions: match current session page copy and
+  check JWT presence instead of comparing token values to the literal `"token"`.
+
 ## [1.0.0] - 2026-08-10
 
 First stable release for **local-storage** Cap Desktop self-hosting. The HTTP
@@ -103,5 +110,6 @@ stable. Breaking changes after 1.0 require a major version bump.
 - Multi-user username/password authentication, Cap Desktop connection, signed
   local uploads/playback, multipart upload emulation, and Instant Mode muxing.
 
+[1.0.1]: https://github.com/lawrence-millard/cap-rust/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/lawrence-millard/cap-rust/compare/v0.3.0...v1.0.0
 [0.3.0]: https://github.com/lawrence-millard/cap-rust/compare/v0.2.0...v0.3.0
