@@ -1,14 +1,6 @@
-mod auth;
-mod config;
-mod error;
-mod routes;
-mod sign;
-mod state;
-mod storage;
-
-use std::sync::Arc;
-
 use axum::http::{HeaderValue, header};
+use cap_server::{config, routes, state, storage};
+use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
@@ -44,7 +36,42 @@ async fn main() {
     )
     .execute(&state.db)
     .await
-    .ok();
+    .expect("failed to ensure legacy default user");
+
+    match routes::upload::recover_stale_mux_jobs(&state).await {
+        Ok(count) if count > 0 => tracing::info!(count, "reclaimed stale mux jobs"),
+        Ok(_) => {}
+        Err(e) => tracing::error!("stale mux recovery failed: {e}"),
+    }
+
+    // Reclaim one bounded batch of stale mux work every hour.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                match routes::upload::recover_stale_mux_jobs(&state).await {
+                    Ok(count) if count > 0 => {
+                        tracing::info!(count, "reclaimed stale mux jobs")
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::error!("stale mux recovery failed: {e}"),
+                }
+            }
+        });
+    }
+
+    // background task: sweep abandoned multipart staging dirs every hour
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                interval.tick().await;
+                storage::cleanup_staging(&state, 24 * 3600).await;
+            }
+        });
+    }
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -60,20 +87,52 @@ async fn main() {
             header::REFERRER_POLICY,
             HeaderValue::from_static("strict-origin-when-cross-origin"),
         ))
-        .layer(SetResponseHeaderLayer::overriding(
-            header::X_FRAME_OPTIONS,
-            HeaderValue::from_static("SAMEORIGIN"),
-        ))
         .layer(TraceLayer::new_for_http())
         .layer(cors);
 
     let addr = format!("0.0.0.0:{}", state.config.port);
-    tracing::info!("cap-server listening on {}", addr);
+    tracing::info!("listening on {}", addr);
     tracing::info!("web_url: {}", state.config.web_url);
     tracing::info!("storage: {}", state.config.storage_dir.display());
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("bind failed");
-    axum::serve(listener, app).await.expect("serve failed");
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .expect("serve failed");
+
+    // Drain in-flight mux jobs (bound the wait, then mark leftovers failed).
+    state
+        .mux_jobs
+        .shutdown(&state.db, std::time::Duration::from_secs(30))
+        .await;
+    tracing::info!("shutdown complete");
+}
+
+/// Wait for SIGINT (Ctrl-C) or SIGTERM, then shut down cleanly so in-flight
+/// uploads finish writing before the process exits.
+async fn shutdown_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install ctrl_c handler");
+    };
+
+    let terminate = async {
+        signal(SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    tracing::info!("shutdown signal received, draining connections");
 }

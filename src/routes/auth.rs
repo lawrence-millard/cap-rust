@@ -29,40 +29,8 @@ pub async fn register(
         return Err(ApiError::Forbidden);
     }
 
+    let user_id = auth::register_user(&state.db, &body.username, &body.password).await?;
     let username = body.username.trim();
-    if username.len() < 3 {
-        return Err(ApiError::BadRequest(
-            "username must be at least 3 characters".into(),
-        ));
-    }
-    if body.password.len() < 8 {
-        return Err(ApiError::BadRequest(
-            "password must be at least 8 characters".into(),
-        ));
-    }
-
-    // Check username uniqueness
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE username = $1)")
-        .bind(username)
-        .fetch_one(&state.db)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    if exists {
-        return Err(ApiError::BadRequest("username already taken".into()));
-    }
-
-    let user_id = uuid::Uuid::new_v4().to_string();
-    let password_hash = auth::hash_password(&body.password)?;
-
-    sqlx::query("INSERT INTO users (id, name, username, password_hash) VALUES ($1, $2, $3, $4)")
-        .bind(&user_id)
-        .bind(username)
-        .bind(username)
-        .bind(&password_hash)
-        .execute(&state.db)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let token = auth::issue_jwt(&state, &user_id)?;
 
@@ -102,7 +70,7 @@ pub async fn login(
         .ok_or(ApiError::Unauthorized)?;
 
     let hash = row.4.ok_or(ApiError::Unauthorized)?;
-    if !auth::verify_password(&body.password, &hash) {
+    if !auth::verify_password(&body.password, &hash).await {
         return Err(ApiError::Unauthorized);
     }
 

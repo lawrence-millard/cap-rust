@@ -12,6 +12,20 @@ jobs:
   check:
     name: fmt + clippy + test
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: cap_test
+          POSTGRES_USER: cap
+          POSTGRES_PASSWORD: cap
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cap"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -27,8 +41,13 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets --locked -- -D warnings
 
-      - name: test
+      - name: test (unit)
         run: cargo test --locked
+
+      - name: test (integration)
+        env:
+          DATABASE_URL: postgres://cap:cap@localhost:5432/cap_test
+        run: cargo test --locked -- --ignored
 
       - name: build
         run: cargo build --release --locked

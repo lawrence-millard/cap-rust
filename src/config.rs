@@ -1,6 +1,14 @@
 use std::env;
 use std::path::PathBuf;
 
+use crate::s3::S3Config;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageBackend {
+    Local,
+    S3,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub database_url: String,
@@ -12,6 +20,9 @@ pub struct Config {
     pub sign_secret: String,
     pub ffmpeg_path: String,
     pub plan_upgraded: bool,
+    pub db_max_connections: u32,
+    pub storage_backend: StorageBackend,
+    pub s3: Option<S3Config>,
 }
 
 impl Config {
@@ -49,6 +60,19 @@ impl Config {
             .map(|v| v != "0" && v.to_lowercase() != "false")
             .unwrap_or(true);
 
+        let db_max_connections = env::var("DB_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5);
+
+        let storage_backend = match env::var("STORAGE_BACKEND").as_deref() {
+            Ok("s3") => StorageBackend::S3,
+            Ok("local") | Err(_) => StorageBackend::Local,
+            Ok(value) => panic!("STORAGE_BACKEND must be `local` or `s3`, got `{value}`"),
+        };
+        let s3 = (storage_backend == StorageBackend::S3)
+            .then(|| S3Config::from_env().expect("invalid S3 configuration"));
+
         Config {
             database_url,
             web_url,
@@ -59,6 +83,16 @@ impl Config {
             sign_secret,
             ffmpeg_path,
             plan_upgraded,
+            db_max_connections,
+            storage_backend,
+            s3,
+        }
+    }
+
+    pub fn storage_backend_name(&self) -> &'static str {
+        match self.storage_backend {
+            StorageBackend::Local => "local",
+            StorageBackend::S3 => "s3",
         }
     }
 }
