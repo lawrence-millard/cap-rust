@@ -10,9 +10,13 @@ pub const STAGING_ACTIVE_MARKER: &str = ".active";
 pub fn resolve(state: &AppState, key: &str) -> Result<PathBuf, ApiError> {
     let parts: Vec<&str> = key.split('/').collect();
     if parts.is_empty()
-        || parts
-            .iter()
-            .any(|p| p.is_empty() || *p == ".." || p.contains('\\'))
+        || parts.iter().any(|p| {
+            p.is_empty()
+                || *p == "."
+                || *p == ".."
+                || p.contains('\\')
+                || p.chars().any(char::is_control)
+        })
     {
         return Err(ApiError::BadRequest("invalid key".into()));
     }
@@ -91,12 +95,27 @@ pub async fn touch_staging_activity_for_key(state: &AppState, key: &str) {
 /// Leftover dirs appear when the client abandons an upload without calling
 /// multipart/abort. Never touches user data. Active uploads with a fresh
 /// `.active` heartbeat are preserved even if the directory itself is old.
+/// Uploads currently marked `finalizing` in the DB are also preserved.
 pub async fn cleanup_staging(state: &AppState, max_age_secs: u64) {
     let staging = match resolve(state, "staging") {
         Ok(p) => p,
         Err(error) => {
             tracing::error!("failed to resolve staging directory: {error}");
             return;
+        }
+    };
+    let finalizing: std::collections::HashSet<String> = match sqlx::query_scalar::<_, String>(
+        "SELECT upload_id FROM multipart_uploads WHERE status = 'finalizing'",
+    )
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(ids) => ids.into_iter().collect(),
+        Err(error) => {
+            tracing::warn!(
+                "failed to load finalizing uploads; continuing filesystem cleanup: {error}"
+            );
+            std::collections::HashSet::new()
         }
     };
     let now = std::time::SystemTime::now();
@@ -120,16 +139,17 @@ pub async fn cleanup_staging(state: &AppState, max_age_secs: u64) {
         if !entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
             continue;
         }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if finalizing.contains(&name) {
+            continue;
+        }
         let activity_mtime = activity_mtime(entry.path()).await.unwrap_or(now);
         if now
             .duration_since(activity_mtime)
             .map(|d| d.as_secs() > max_age_secs)
             .unwrap_or(false)
         {
-            tracing::info!(
-                "cleaning stale staging dir: {}",
-                entry.file_name().to_string_lossy()
-            );
+            tracing::info!("cleaning stale staging dir: {name}");
             if let Err(error) = tokio::fs::remove_dir_all(entry.path()).await {
                 tracing::error!("failed to clean stale staging directory: {error}");
             }
@@ -170,6 +190,7 @@ mod tests {
             db_max_connections: 5,
             storage_backend: crate::config::StorageBackend::Local,
             s3: None,
+            cors_origins: Vec::new(),
         };
         let signer = crate::sign::Signer::new(config.sign_secret.as_bytes());
         AppState {

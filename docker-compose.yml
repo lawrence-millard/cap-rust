@@ -9,7 +9,7 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL}
       WEB_URL: ${WEB_URL}
-      CAP_SIGNUPS: ${CAP_SIGNUPS:-true}
+      CAP_SIGNUPS: ${CAP_SIGNUPS:-false}
       SIGN_SECRET: ${SIGN_SECRET}
       STORAGE_DIR: /data
       PORT: 8080

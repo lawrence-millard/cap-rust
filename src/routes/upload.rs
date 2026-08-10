@@ -182,15 +182,16 @@ fn validate_subpath(sub: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn valid_component(value: &str) -> bool {
+pub(crate) fn valid_component(value: &str) -> bool {
     !value.is_empty()
         && value != "."
         && value != ".."
         && !value.contains('\\')
         && !value.chars().any(char::is_control)
+        && value.len() <= 128
 }
 
-fn validate_component(value: &str, field: &str) -> Result<(), ApiError> {
+pub(crate) fn validate_component(value: &str, field: &str) -> Result<(), ApiError> {
     if !valid_component(value) || value.contains('/') {
         return Err(ApiError::BadRequest(format!("invalid {field}")));
     }
@@ -378,7 +379,7 @@ pub async fn signed(
         || body.fps.is_some()
     {
         sqlx::query(
-            "UPDATE videos SET duration = $1, width = $2, height = $3, fps = $4 WHERE id = $5",
+            "UPDATE videos SET duration = COALESCE($1, duration), width = COALESCE($2, width), height = COALESCE($3, height), fps = COALESCE($4, fps) WHERE id = $5",
         )
         .bind(body.duration_in_secs)
         .bind(body.width)
@@ -387,7 +388,7 @@ pub async fn signed(
         .bind(&body.video_id)
         .execute(&state.db)
         .await
-        .ok();
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
     }
 
     let url = put_url(&state, &backend, &key, PUT_TTL)?;
@@ -589,6 +590,8 @@ pub async fn multipart_complete(
         }
         return Err(ApiError::BadRequest("upload is not active".into()));
     }
+
+    storage::touch_staging_activity(&state, &body.upload_id).await?;
 
     if let Err(error) = assemble_multipart(&state, &body.upload_id, &key, &parts).await {
         sqlx::query(

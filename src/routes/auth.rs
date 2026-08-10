@@ -50,40 +50,25 @@ pub async fn login(
     State(state): State<Arc<AppState>>,
     axum::extract::Json(body): axum::extract::Json<LoginReq>,
 ) -> Result<Json<Value>, ApiError> {
-    let username = body.username.trim();
-
-    let row =
-        sqlx::query_as::<
-            _,
-            (
-                String,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-            ),
-        >("SELECT id, name, email, username, password_hash FROM users WHERE username = $1")
-        .bind(username)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .ok_or(ApiError::Unauthorized)?;
-
-    let hash = row.4.ok_or(ApiError::Unauthorized)?;
-    if !auth::verify_password(&body.password, &hash).await {
-        return Err(ApiError::Unauthorized);
-    }
-
-    let user_id = row.0;
+    let user_id = auth::login_user(&state.db, &body.username, &body.password).await?;
     let token = auth::issue_jwt(&state, &user_id)?;
+
+    let row = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>)>(
+        "SELECT name, email, username FROM users WHERE id = $1",
+    )
+    .bind(&user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?
+    .ok_or(ApiError::Unauthorized)?;
 
     Ok(Json(json!({
         "token": token,
         "user": {
             "id": user_id,
-            "name": row.1,
-            "email": row.2,
-            "username": row.3,
+            "name": row.0,
+            "email": row.1,
+            "username": row.2,
         },
     })))
 }

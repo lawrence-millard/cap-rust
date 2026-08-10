@@ -30,8 +30,10 @@ local disk, with beta direct `desktopMP4` S3 storage.
   plus public aggregate counts.
 - Cookie-deduplicated public views, counted once per visitor/video/day, with
   owner totals and up to 366 daily buckets.
-- Per-video owner download-preference metadata and `GET /health` DB reachability
-  checks. Media handlers do not enforce that preference.
+- Per-video download preference: share pages use `controlsList="nodownload"` when
+  disabled, and `GET /api/playlist?...&download=true` is forbidden for non-owners.
+  Streaming playback URLs remain available so viewers can still watch.
+- `GET /health` DB reachability checks.
 - Automatic forward-only SQL migrations and graceful SIGINT/SIGTERM shutdown.
 
 ### Password access
@@ -40,8 +42,9 @@ Account passwords work for registration and login. Owners can set recording
 access to public, private, or password through `PATCH /api/videos/{videoId}/access`.
 Password share pages unlock through
 `POST /api/public/videos/{videoId}/access/unlock`; a signed HttpOnly cookie grants
-share, embed, playlist, and collaboration access for 15 minutes. Generated media
-URLs remain bearer URLs until they expire.
+share, embed, playlist, and collaboration access for 15 minutes. Changing or
+clearing the recording password invalidates existing unlock cookies. Generated
+media URLs remain bearer URLs until they expire.
 
 ## Routes
 
@@ -96,7 +99,7 @@ authenticated collaboration routes accept a JWT or API key.
   target top-level comments only.
 - Caption language: 2-35 ASCII letters, digits, or hyphens. Label: 1-100
   bytes. Only one enabled default caption per video.
-- Username: 3-32 bytes, case-sensitive. Account password: at least 8 bytes.
+- Username: 3-32 bytes, case-sensitive. Account password: 8-1024 bytes.
   JWT default lifetime: 30 days.
 - Media supports one HTTP byte range per request, not multipart ranges.
 
@@ -126,9 +129,10 @@ Put server behind HTTPS, then set Cap Desktop's Cap Server URL to `WEB_URL`.
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
 | `DATABASE_URL` | yes | none | Postgres connection string |
-| `SIGN_SECRET` | yes | none | At least 16 characters; signs JWTs and local upload/media URLs |
+| `SIGN_SECRET` | yes | none | At least 16 characters; rejects known placeholders; signs JWTs and local upload/media URLs |
 | `WEB_URL` | no | `http://localhost:8080` | Public server URL, without trailing slash |
-| `CAP_SIGNUPS` | no | `true` | Set `false` or `0` to disable new accounts |
+| `CORS_ORIGINS` | no | none | Extra allowed CORS origins (comma-separated); `WEB_URL` is always allowed |
+| `CAP_SIGNUPS` | no | `true` | Set `false` or `0` to disable new accounts (compose defaults to `false`) |
 | `CAP_PLAN_UPGRADED` | no | `true` | Plan value returned to Cap Desktop |
 | `JWT_TTL` | no | `2592000` | JWT lifetime in seconds |
 | `DB_MAX_CONNECTIONS` | no | `5` | Postgres pool maximum; values below 1 become 1 |
@@ -180,13 +184,17 @@ bash scripts/contract-test.sh
 ## Security
 
 - Use HTTPS. JWTs, API keys, and signed URLs are bearer credentials.
-- Use strong `SIGN_SECRET`; set `CAP_SIGNUPS=false` when open registration is
-  unwanted.
+- Use strong `SIGN_SECRET` (not a placeholder); set `CAP_SIGNUPS=false` when open
+  registration is unwanted.
+- Desktop API keys are stored hashed; legacy plaintext key rows still authenticate
+  until those devices re-login.
 - Recordings use `{STORAGE_DIR}/{user}/{video}/...`; signed URL paths are
   traversal-checked and uploads publish through atomic rename.
 - Share, embed, playlist, public collaboration, and view routes enforce current
   public/private/password access mode. Share and embed pages intentionally allow
   cross-origin framing so share links can be embedded on other sites.
+- Non-public signed media responses use `Cache-Control: private, no-store`.
+- CORS is limited to `WEB_URL` plus optional `CORS_ORIGINS`.
 
 ## Notes
 

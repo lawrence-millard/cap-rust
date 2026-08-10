@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::auth::CurrentUser;
 use crate::error::ApiError;
-use crate::routes::upload::get_now;
+use crate::routes::upload::{self, get_now};
 use crate::routes::videos::delete_owned_video;
 use crate::state::AppState;
 
@@ -14,7 +14,7 @@ const VIDEO_CREATE_SQL: &str =
     "INSERT INTO videos (id, owner_id, name, source, public, is_screenshot, duration, width, height, fps, created_at, storage_backend)
      VALUES ($1, $2, $3, $4, true, $5, $6, $7, $8, $9, to_timestamp($10), $11)
      ON CONFLICT (id) DO UPDATE
-     SET name = $3, duration = $6, width = $7, height = $8, fps = $9
+     SET name = $3, source = $4, is_screenshot = $5, duration = $6, width = $7, height = $8, fps = $9
      WHERE videos.owner_id = EXCLUDED.owner_id
      RETURNING id";
 
@@ -105,9 +105,7 @@ pub async fn video_create(
     Query(query): Query<VideoCreateQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let video_id = if let Some(ref vid) = query.video_id {
-        if vid.contains('/') || vid.contains("..") {
-            return Err(ApiError::BadRequest("invalid videoId".into()));
-        }
+        upload::validate_component(vid, "videoId")?;
         vid.clone()
     } else {
         uuid::Uuid::new_v4().to_string()
@@ -262,7 +260,9 @@ pub async fn video_delete(
 ) -> Result<Json<Value>, ApiError> {
     let video_id = &query.video_id;
 
-    delete_owned_video(&state, user.user_id(), video_id).await?;
+    if !delete_owned_video(&state, user.user_id(), video_id).await? {
+        return Err(ApiError::NotFound);
+    }
 
     Ok(Json(json!(true)))
 }

@@ -32,7 +32,8 @@ pub async fn get(
         return Err(ApiError::Unauthorized);
     }
     let path = storage::resolve(&state, &key)?;
-    serve_file_with_range(&path, &headers).await
+    let cache_control = cache_control_for_key(&state, &key).await;
+    serve_file_with_range(&path, &headers, cache_control).await
 }
 
 /// POST /up/{*key}?exp=&sig=  — signed upload target. Streams body to disk.
@@ -49,26 +50,42 @@ pub async fn put(
     let path = storage::resolve(&state, &key)?;
     let content_length = headers
         .get(header::CONTENT_LENGTH)
-        .map(|value| {
-            value
-                .to_str()
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .ok_or_else(|| ApiError::BadRequest("invalid Content-Length".into()))
-        })
-        .transpose()?;
-    if content_length.is_some_and(|length| length > MAX_UPLOAD_BYTES) {
+        .ok_or_else(|| ApiError::BadRequest("Content-Length required".into()))?
+        .to_str()
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| ApiError::BadRequest("invalid Content-Length".into()))?;
+    if content_length > MAX_UPLOAD_BYTES {
         return Err(ApiError::BadRequest("upload exceeds 20 GiB limit".into()));
     }
 
     storage::ensure_parent(&state, &key).await?;
     storage::touch_staging_activity_for_key(&state, &key).await;
-    write_upload_atomic(&path, body, content_length).await?;
+    write_upload_atomic(&path, body, Some(content_length)).await?;
 
     // Refresh again after the write so long part uploads keep the heartbeat fresh.
     storage::touch_staging_activity_for_key(&state, &key).await;
 
     Ok(StatusCode::OK)
+}
+
+async fn cache_control_for_key(state: &AppState, key: &str) -> &'static str {
+    // Keys are `{owner}/{videoId}/...`. Non-public videos must not be cached by shared proxies.
+    let mut parts = key.split('/');
+    let _owner = parts.next();
+    let Some(video_id) = parts.next() else {
+        return "private, no-store";
+    };
+    let mode: Option<String> = sqlx::query_scalar("SELECT access_mode FROM videos WHERE id = $1")
+        .bind(video_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+    match mode.as_deref() {
+        Some("public") => "public, max-age=31536000, immutable",
+        _ => "private, no-store",
+    }
 }
 
 async fn write_upload_atomic(
@@ -156,6 +173,7 @@ fn content_type_for(path: &std::path::Path) -> &'static str {
 async fn serve_file_with_range(
     path: &std::path::Path,
     headers: &HeaderMap,
+    cache_control: &'static str,
 ) -> Result<Response, ApiError> {
     let meta = fs::metadata(path).await.map_err(|_| ApiError::NotFound)?;
     if !meta.is_file() {
@@ -224,7 +242,8 @@ async fn serve_file_with_range(
                 .header(header::CONTENT_LENGTH, len.to_string())
                 .header(header::CONTENT_RANGE, format!("bytes {s}-{e}/{file_size}"))
                 .header(header::ACCEPT_RANGES, "bytes")
-                .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable");
+                .header(header::CACHE_CONTROL, cache_control)
+                .header(header::CONTENT_DISPOSITION, "inline");
             Ok(resp_builder.body(stream)?)
         }
         _ if range_requested => Ok(resp_builder
@@ -242,7 +261,8 @@ async fn serve_file_with_range(
                 .header(header::CONTENT_TYPE, ctype)
                 .header(header::CONTENT_LENGTH, file_size.to_string())
                 .header(header::ACCEPT_RANGES, "bytes")
-                .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable");
+                .header(header::CACHE_CONTROL, cache_control)
+                .header(header::CONTENT_DISPOSITION, "inline");
             Ok(resp_builder.body(stream)?)
         }
     }
@@ -387,7 +407,9 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(header::RANGE, "bytes=2-4".parse().unwrap());
 
-        let response = serve_file_with_range(&path, &headers).await.unwrap();
+        let response = serve_file_with_range(&path, &headers, "private, no-store")
+            .await
+            .unwrap();
         let body = response.into_body().collect().await.unwrap().to_bytes();
 
         assert_eq!(&body[..], b"234");

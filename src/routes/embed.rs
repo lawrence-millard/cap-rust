@@ -62,15 +62,23 @@ pub async fn embed(
     Path(video_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Html<String>, ApiError> {
-    let (name, owner_id, mode) = sqlx::query_as::<_, (Option<String>, String, String)>(
-        "SELECT name, owner_id, access_mode FROM videos WHERE id = $1",
+    let (name, owner_id, mode, epoch) = sqlx::query_as::<_, (Option<String>, String, String, i32)>(
+        "SELECT name, owner_id, access_mode, access_cookie_epoch FROM videos WHERE id = $1",
     )
     .bind(&video_id)
     .fetch_optional(&state.db)
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))?
     .ok_or(ApiError::NotFound)?;
-    if !access::policy_allows(&mode, &owner_id, &video_id, &headers, None, &state.signer) {
+    if !access::policy_allows(
+        &mode,
+        &owner_id,
+        &video_id,
+        &headers,
+        None,
+        &state.signer,
+        epoch,
+    ) {
         return Err(ApiError::NotFound);
     }
     let title = html_escape(name.as_deref().unwrap_or("Cap Recording"));

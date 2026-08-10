@@ -24,7 +24,7 @@ fn test_config() -> Config {
         web_url: "http://test.local".into(),
         cap_signups: true,
         jwt_ttl_secs: 3600,
-        storage_dir: std::env::temp_dir().join("cap-rust-tests"),
+        storage_dir: std::env::temp_dir().join(format!("cap-rust-tests-{}", uuid::Uuid::new_v4())),
         port: 8080,
         sign_secret: "test-secret-test-secret-test-secret".into(),
         ffmpeg_path: "ffmpeg".into(),
@@ -32,6 +32,7 @@ fn test_config() -> Config {
         db_max_connections: 5,
         storage_backend: cap_server::config::StorageBackend::Local,
         s3: None,
+        cors_origins: Vec::new(),
     }
 }
 
@@ -59,8 +60,9 @@ async fn json_body(resp: axum::response::Response) -> Value {
     serde_json::from_str(&body_text(resp).await).expect("valid json")
 }
 
-/// Register a fresh user, return (api_key, user_id).
-async fn register(app: &axum::Router, username: &str) -> (String, String) {
+/// Register a fresh user, return (api_key, user_id, username).
+async fn register(app: &axum::Router, username: &str) -> (String, String, String) {
+    let username = format!("{username}-{}", &uuid::Uuid::new_v4().to_string()[..8]);
     let resp = app
         .clone()
         .oneshot(
@@ -108,7 +110,7 @@ async fn register(app: &axum::Router, username: &str) -> (String, String) {
         .unwrap()
         .to_string();
     let _ = token;
-    (api_key, user_id)
+    (api_key, user_id, username)
 }
 
 #[tokio::test]
@@ -155,7 +157,7 @@ async fn unauthenticated_requests_rejected() {
 #[ignore]
 async fn register_and_login_roundtrip() {
     let app = app().await;
-    let (api_key, _) = register(&app, "alice").await;
+    let (api_key, _, username) = register(&app, "alice").await;
 
     // wrong password rejected
     let resp = app
@@ -166,13 +168,31 @@ async fn register_and_login_roundtrip() {
                 .uri("/api/auth/login")
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    serde_json::json!({"username": "alice", "password": "wrongpass"}).to_string(),
+                    serde_json::json!({"username": username, "password": "wrongpass"}).to_string(),
                 ))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // successful login
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"username": username, "password": "test1234"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(json_body(resp).await["token"].as_str().is_some());
 
     // duplicate register rejected
     let resp = app
@@ -183,7 +203,28 @@ async fn register_and_login_roundtrip() {
                 .uri("/api/auth/register")
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    serde_json::json!({"username": "alice", "password": "test1234"}).to_string(),
+                    serde_json::json!({"username": username, "password": "test1234"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // oversized password rejected
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/register")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "username": format!("bigpw-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                        "password": "x".repeat(1025)
+                    })
+                    .to_string(),
                 ))
                 .unwrap(),
         )
@@ -210,7 +251,7 @@ async fn register_and_login_roundtrip() {
 #[ignore]
 async fn video_lifecycle_upload_and_playback() {
     let app = app().await;
-    let (api_key, _) = register(&app, "bob").await;
+    let (api_key, _, _) = register(&app, "bob").await;
     let auth = format!("Bearer {api_key}");
 
     // create video
@@ -258,6 +299,7 @@ async fn video_lifecycle_upload_and_playback() {
                 .method("PUT")
                 .uri(&upload_url)
                 .header(CONTENT_TYPE, "video/mp4")
+                .header(header::CONTENT_LENGTH, "1024")
                 .body(Body::from(vec![0u8; 1024]))
                 .unwrap(),
         )
@@ -310,6 +352,12 @@ async fn video_lifecycle_upload_and_playback() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("public, max-age=31536000, immutable")
+    );
 
     // range request -> 206 partial
     let resp = app
@@ -344,8 +392,8 @@ async fn video_lifecycle_upload_and_playback() {
 #[ignore]
 async fn ownership_enforced() {
     let app = app().await;
-    let (alice_key, _) = register(&app, "carol").await;
-    let (bob_key, _) = register(&app, "dave").await;
+    let (alice_key, _, _) = register(&app, "carol").await;
+    let (bob_key, _, _) = register(&app, "dave").await;
 
     // carol creates a video
     let resp = app
@@ -398,7 +446,7 @@ async fn ownership_enforced() {
 #[ignore]
 async fn video_status_endpoint() {
     let app = app().await;
-    let (api_key, _) = register(&app, "erin").await;
+    let (api_key, _, _) = register(&app, "erin").await;
     let auth = format!("Bearer {api_key}");
 
     let resp = app
@@ -435,7 +483,7 @@ async fn video_status_endpoint() {
 #[ignore]
 async fn path_traversal_rejected_on_upload() {
     let app = app().await;
-    let (api_key, _) = register(&app, "frank").await;
+    let (api_key, _, _) = register(&app, "frank").await;
     let auth = format!("Bearer {api_key}");
 
     let resp = app
@@ -454,4 +502,352 @@ async fn path_traversal_rejected_on_upload() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[ignore]
+async fn password_access_gates_share_and_playlist() {
+    let app = app().await;
+    let (api_key, _, _) = register(&app, "gina").await;
+    let auth = format!("Bearer {api_key}");
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/desktop/video/create?recordingMode=desktopMP4&name=secret")
+                .header(AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let video_id = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/videos/{video_id}/access"))
+                .header(AUTHORIZATION, &auth)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"mode": "password", "password": "hunter2!!"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/s/{video_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let html = body_text(resp).await;
+    assert!(html.contains("Password protected"));
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/playlist?videoId={video_id}&videoType=mp4"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/public/videos/{video_id}/access/unlock"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"password": "hunter2!!"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cookie = resp
+        .headers()
+        .get(header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/playlist?videoId={video_id}&videoType=mp4"))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // No media uploaded yet → still 404 for the object, but access is allowed past policy.
+    assert!(
+        resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::SEE_OTHER,
+        "unexpected status {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn downloads_enabled_blocks_explicit_download_query() {
+    let app = app().await;
+    let (api_key, _, _) = register(&app, "hank").await;
+    let auth = format!("Bearer {api_key}");
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/desktop/video/create?recordingMode=desktopMP4")
+                .header(AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let video_id = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/videos/{video_id}/collaboration"))
+                .header(AUTHORIZATION, &auth)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"downloadsEnabled": false}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/playlist?videoId={video_id}&videoType=mp4&download=true"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // Streaming playlist without download=true remains allowed for public videos.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/playlist?videoId={video_id}&videoType=mp4"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::SEE_OTHER,
+        "unexpected status {}",
+        resp.status()
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/s/{video_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(body_text(resp).await.contains("nodownload"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn desktop_delete_missing_and_invalid_create_id() {
+    let app = app().await;
+    let (api_key, _, _) = register(&app, "ivy").await;
+    let auth = format!("Bearer {api_key}");
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/desktop/video/delete?videoId=does-not-exist")
+                .header(AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/desktop/video/create?videoId=bad/id&recordingMode=desktopMP4")
+                .header(AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/desktop/video/create?videoId=.&recordingMode=desktopMP4")
+                .header(AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[ignore]
+async fn private_media_uses_private_cache_control() {
+    let app = app().await;
+    let (api_key, _, _) = register(&app, "jade").await;
+    let auth = format!("Bearer {api_key}");
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/desktop/video/create?recordingMode=desktopMP4")
+                .header(AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let video_id = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/videos/{video_id}/access"))
+                .header(AUTHORIZATION, &auth)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"mode": "private"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/upload/signed")
+                .header(AUTHORIZATION, &auth)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"videoId": video_id, "subpath": "result.mp4"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let upload_url = json_body(resp).await["presignedPutData"]["url"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(&upload_url)
+                .header(CONTENT_TYPE, "video/mp4")
+                .header(header::CONTENT_LENGTH, "64")
+                .body(Body::from(vec![1u8; 64]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/videos/{video_id}/download"))
+                .header(AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
+    let media_url = resp
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&media_url)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("private, no-store")
+    );
 }

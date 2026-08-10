@@ -23,7 +23,16 @@ pub struct Config {
     pub db_max_connections: u32,
     pub storage_backend: StorageBackend,
     pub s3: Option<S3Config>,
+    pub cors_origins: Vec<String>,
 }
+
+const WEAK_SIGN_SECRETS: &[&str] = &[
+    "change-me-to-a-long-random-string",
+    "changeme",
+    "secret",
+    "password",
+    "test-secret-test-secret",
+];
 
 impl Config {
     pub fn from_env() -> Self {
@@ -45,6 +54,10 @@ impl Config {
         assert!(
             sign_secret.len() >= 16,
             "SIGN_SECRET must be at least 16 characters; use `openssl rand -hex 32`"
+        );
+        assert!(
+            !WEAK_SIGN_SECRETS.contains(&sign_secret.as_str()),
+            "SIGN_SECRET looks like a placeholder; use `openssl rand -hex 32`"
         );
 
         let cap_signups = env::var("CAP_SIGNUPS")
@@ -73,6 +86,18 @@ impl Config {
         let s3 = (storage_backend == StorageBackend::S3)
             .then(|| S3Config::from_env().expect("invalid S3 configuration"));
 
+        let cors_origins = env::var("CORS_ORIGINS")
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+
         Config {
             database_url,
             web_url,
@@ -86,6 +111,7 @@ impl Config {
             db_max_connections,
             storage_backend,
             s3,
+            cors_origins,
         }
     }
 

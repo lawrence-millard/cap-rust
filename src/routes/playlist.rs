@@ -5,6 +5,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::auth::OptionalUser;
 use crate::error::ApiError;
 use crate::routes::access;
 use crate::state::AppState;
@@ -32,18 +33,32 @@ pub struct PlaylistParams {
     pub video_type: String,
     pub user_id: Option<String>,
     pub require_complete: Option<String>,
+    /// When true, treat this as an explicit download (not streaming playback).
+    pub download: Option<String>,
+}
+
+fn wants_download(params: &PlaylistParams) -> bool {
+    matches!(
+        params
+            .download
+            .as_deref()
+            .map(|v| v.to_ascii_lowercase())
+            .as_deref(),
+        Some("1" | "true" | "yes")
+    )
 }
 
 pub async fn get(
     State(state): State<Arc<AppState>>,
     Query(params): Query<PlaylistParams>,
     headers: HeaderMap,
+    OptionalUser(user): OptionalUser,
 ) -> Result<impl IntoResponse, ApiError> {
     let video_id = &params.video_id;
 
     // fetch video
-    let row = sqlx::query_as::<_, (String, String, Option<serde_json::Value>, bool, Option<f64>, Option<i32>, Option<i32>, Option<f64>, String, String)>(
-        "SELECT id, owner_id, source, is_screenshot, duration, width, height, fps, access_mode, storage_backend FROM videos WHERE id = $1",
+    let row = sqlx::query_as::<_, (String, String, Option<serde_json::Value>, bool, Option<f64>, Option<i32>, Option<i32>, Option<f64>, String, String, bool, i32)>(
+        "SELECT id, owner_id, source, is_screenshot, duration, width, height, fps, access_mode, storage_backend, downloads_enabled, access_cookie_epoch FROM videos WHERE id = $1",
     )
     .bind(video_id)
     .fetch_optional(&state.db)
@@ -51,8 +66,21 @@ pub async fn get(
     .map_err(|e| ApiError::Internal(e.to_string()))?
     .ok_or(ApiError::NotFound)?;
 
-    if !access::policy_allows(&row.8, &row.1, video_id, &headers, None, &state.signer) {
+    if !access::policy_allows(
+        &row.8,
+        &row.1,
+        video_id,
+        &headers,
+        user.as_ref(),
+        &state.signer,
+        row.11,
+    ) {
         return Err(ApiError::NotFound);
+    }
+
+    let is_owner = user.as_ref().is_some_and(|u| u.user_id() == row.1);
+    if wants_download(&params) && !row.10 && !is_owner {
+        return Err(ApiError::Forbidden);
     }
 
     let owner_id = &row.1;

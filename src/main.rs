@@ -1,7 +1,7 @@
-use axum::http::{HeaderValue, header};
+use axum::http::{HeaderName, HeaderValue, header};
 use cap_server::{config, routes, state, storage};
 use std::sync::Arc;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::layer::SubscriberExt;
@@ -73,10 +73,7 @@ async fn main() {
         });
     }
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let cors = build_cors(&state.config.web_url, &state.config.cors_origins);
 
     let app = routes::router(state.clone())
         .layer(SetResponseHeaderLayer::overriding(
@@ -110,6 +107,38 @@ async fn main() {
         .shutdown(&state.db, std::time::Duration::from_secs(30))
         .await;
     tracing::info!("shutdown complete");
+}
+
+fn build_cors(web_url: &str, extra_origins: &[String]) -> CorsLayer {
+    let mut origins = Vec::new();
+    if let Ok(origin) = HeaderValue::from_str(web_url.trim_end_matches('/')) {
+        origins.push(origin);
+    }
+    for origin in extra_origins {
+        if let Ok(value) = HeaderValue::from_str(origin.trim()) {
+            origins.push(value);
+        }
+    }
+    if origins.is_empty() {
+        return CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers([
+                header::AUTHORIZATION,
+                header::CONTENT_TYPE,
+                header::ACCEPT,
+                HeaderName::from_static("range"),
+            ]);
+    }
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods(Any)
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::ACCEPT,
+            HeaderName::from_static("range"),
+        ])
 }
 
 /// Wait for SIGINT (Ctrl-C) or SIGTERM, then shut down cleanly so in-flight

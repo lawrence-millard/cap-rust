@@ -28,9 +28,10 @@ type VideoRow = (
     DateTime<Utc>,
     Option<String>,
     Option<String>,
+    String,
 );
 
-const VIDEO_COLUMNS: &str = "id, name, metadata, public, source, duration, width, height, fps, is_screenshot, created_at, updated_at, mux_status, mux_error";
+const VIDEO_COLUMNS: &str = "id, name, metadata, public, source, duration, width, height, fps, is_screenshot, created_at, updated_at, mux_status, mux_error, access_mode";
 
 #[derive(Deserialize)]
 pub struct ListQuery {
@@ -62,6 +63,7 @@ fn video_json(row: VideoRow) -> Value {
         "metadata": row.2,
         "visibility": if row.3 { "public" } else { "private" },
         "public": row.3,
+        "accessMode": row.14,
         "source": row.4,
         "duration": row.5,
         "width": row.6,
@@ -163,19 +165,33 @@ pub async fn patch(
 ) -> Result<Json<Value>, ApiError> {
     let public = validate_patch(&body)?;
     let name = body.name.map(|name| name.trim().to_string());
-    let sql = format!(
-        "UPDATE videos SET name = COALESCE($3, name), metadata = COALESCE($4, metadata), public = COALESCE($5, public), updated_at = now() WHERE id = $1 AND owner_id = $2 RETURNING {VIDEO_COLUMNS}"
-    );
-    let row = sqlx::query_as::<_, VideoRow>(&sql)
-        .bind(video_id)
-        .bind(user.user_id())
-        .bind(name)
-        .bind(body.metadata)
-        .bind(public)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .ok_or(ApiError::NotFound)?;
+    // Avoid SET public=public so the access-compat trigger does not fire on name/metadata-only patches.
+    let row = if let Some(public) = public {
+        let sql = format!(
+            "UPDATE videos SET name = COALESCE($3, name), metadata = COALESCE($4, metadata), public = $5, updated_at = now() WHERE id = $1 AND owner_id = $2 RETURNING {VIDEO_COLUMNS}"
+        );
+        sqlx::query_as::<_, VideoRow>(&sql)
+            .bind(&video_id)
+            .bind(user.user_id())
+            .bind(&name)
+            .bind(&body.metadata)
+            .bind(public)
+            .fetch_optional(&state.db)
+            .await
+    } else {
+        let sql = format!(
+            "UPDATE videos SET name = COALESCE($3, name), metadata = COALESCE($4, metadata), updated_at = now() WHERE id = $1 AND owner_id = $2 RETURNING {VIDEO_COLUMNS}"
+        );
+        sqlx::query_as::<_, VideoRow>(&sql)
+            .bind(&video_id)
+            .bind(user.user_id())
+            .bind(&name)
+            .bind(&body.metadata)
+            .fetch_optional(&state.db)
+            .await
+    }
+    .map_err(|e| ApiError::Internal(e.to_string()))?
+    .ok_or(ApiError::NotFound)?;
     Ok(Json(video_json(row)))
 }
 

@@ -172,13 +172,14 @@ async fn require_visible(
     headers: &HeaderMap,
     user: Option<&CurrentUser>,
 ) -> Result<String, ApiError> {
-    let (owner_id, access_mode, backend): (String, String, String) =
-        sqlx::query_as("SELECT owner_id, access_mode, storage_backend FROM videos WHERE id = $1")
-            .bind(video_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(db_error)?
-            .ok_or(ApiError::NotFound)?;
+    let (owner_id, access_mode, backend, epoch): (String, String, String, i32) = sqlx::query_as(
+        "SELECT owner_id, access_mode, storage_backend, access_cookie_epoch FROM videos WHERE id = $1",
+    )
+    .bind(video_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(db_error)?
+    .ok_or(ApiError::NotFound)?;
     if access::policy_allows(
         &access_mode,
         &owner_id,
@@ -186,6 +187,7 @@ async fn require_visible(
         headers,
         user,
         &state.signer,
+        epoch,
     ) {
         Ok(backend)
     } else {
@@ -506,22 +508,27 @@ pub async fn toggle_reaction(
 ) -> Result<Json<Value>, ApiError> {
     require_visible(&state, &video_id, &headers, Some(&user)).await?;
     validate_reaction(&body.emoji)?;
-    let deleted =
-        sqlx::query("DELETE FROM video_reactions WHERE video_id=$1 AND user_id=$2 AND emoji=$3")
-            .bind(&video_id)
-            .bind(user.user_id())
-            .bind(&body.emoji)
-            .execute(&state.db)
-            .await
-            .map_err(db_error)?;
-    let active = if deleted.rows_affected() == 0 {
-        sqlx::query("INSERT INTO video_reactions (video_id,user_id,emoji) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING")
-            .bind(video_id).bind(user.user_id()).bind(&body.emoji).execute(&state.db).await.map_err(db_error)?;
-        true
-    } else {
-        false
-    };
-    Ok(Json(json!({"emoji": body.emoji, "active": active})))
+    // Atomic toggle: delete if present, otherwise insert.
+    let toggled = sqlx::query_as::<_, (bool,)>(
+        "WITH deleted AS ( \
+            DELETE FROM video_reactions \
+            WHERE video_id=$1 AND user_id=$2 AND emoji=$3 \
+            RETURNING 1 \
+         ), inserted AS ( \
+            INSERT INTO video_reactions (video_id,user_id,emoji) \
+            SELECT $1,$2,$3 WHERE NOT EXISTS (SELECT 1 FROM deleted) \
+            ON CONFLICT DO NOTHING \
+            RETURNING 1 \
+         ) \
+         SELECT EXISTS(SELECT 1 FROM inserted) AS active",
+    )
+    .bind(&video_id)
+    .bind(user.user_id())
+    .bind(&body.emoji)
+    .fetch_one(&state.db)
+    .await
+    .map_err(db_error)?;
+    Ok(Json(json!({"emoji": body.emoji, "active": toggled.0})))
 }
 
 pub async fn list_reactions(
@@ -560,10 +567,10 @@ pub async fn public_reactions(
 
 fn visitor_from_cookie(headers: &HeaderMap) -> Option<String> {
     headers
-        .get(COOKIE)?
-        .to_str()
-        .ok()?
-        .split(';')
+        .get_all(COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
         .find_map(|part| {
             let (name, value) = part.trim().split_once('=')?;
             (name == VIEW_COOKIE && uuid::Uuid::parse_str(value).is_ok()).then(|| value.to_string())
@@ -732,14 +739,14 @@ mod tests {
     #[test]
     fn collaboration_policy_allows_unlocked_authenticated_non_owner() {
         let signer = Signer::new(b"secret");
-        let signed = signer.get_url("", "recording-access/video", 900);
+        let signed = signer.get_url("", "recording-access/video/0", 900);
         let query = signed.split_once('?').unwrap().1;
         let (exp, sig) = query.split_once('&').unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(
             COOKIE,
             HeaderValue::from_str(&format!(
-                "cap_recording_access=video.{}.{}",
+                "cap_recording_access=video.0.{}.{}",
                 exp.strip_prefix("exp=").unwrap(),
                 sig.strip_prefix("sig=").unwrap()
             ))
@@ -758,10 +765,11 @@ mod tests {
             "video",
             &headers,
             Some(&user),
-            &signer
+            &signer,
+            0
         ));
         assert!(access::policy_allows(
-            "password", "owner", "video", &headers, None, &signer
+            "password", "owner", "video", &headers, None, &signer, 0
         ));
         assert!(!access::policy_allows(
             "private",
@@ -769,7 +777,8 @@ mod tests {
             "video",
             &headers,
             Some(&user),
-            &signer
+            &signer,
+            0
         ));
     }
 }

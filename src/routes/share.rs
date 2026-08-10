@@ -18,8 +18,8 @@ pub async fn video(
     Path(video_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
-    let row = sqlx::query_as::<_, (String, String, Option<String>, Option<serde_json::Value>, bool, Option<f64>, Option<i32>, Option<i32>, Option<f64>, chrono::DateTime<chrono::Utc>, String)>(
-        "SELECT id, owner_id, name, source, is_screenshot, duration, width, height, fps, created_at, access_mode FROM videos WHERE id = $1",
+    let row = sqlx::query_as::<_, (String, String, Option<String>, Option<serde_json::Value>, bool, Option<f64>, Option<i32>, Option<i32>, Option<f64>, chrono::DateTime<chrono::Utc>, String, bool, i32)>(
+        "SELECT id, owner_id, name, source, is_screenshot, duration, width, height, fps, created_at, access_mode, downloads_enabled, access_cookie_epoch FROM videos WHERE id = $1",
     )
     .bind(&video_id)
     .fetch_optional(&state.db)
@@ -27,7 +27,15 @@ pub async fn video(
     .map_err(|e| ApiError::Internal(e.to_string()))?
     .ok_or(ApiError::NotFound)?;
 
-    if !access::policy_allows(&row.10, &row.1, &video_id, &headers, None, &state.signer) {
+    if !access::policy_allows(
+        &row.10,
+        &row.1,
+        &video_id,
+        &headers,
+        None,
+        &state.signer,
+        row.12,
+    ) {
         if row.10 == access::AccessMode::Password.as_str() {
             return Ok(render_unlock_page(&video_id).into_response());
         }
@@ -43,6 +51,7 @@ pub async fn video(
         .and_then(|v| v.as_str())
         .unwrap_or("desktopMP4");
     let is_screenshot = row.4;
+    let downloads_enabled = row.11;
 
     // determine media kind for player
     let is_segments = source_type == "desktopSegments";
@@ -61,12 +70,12 @@ pub async fn video(
     // HLS for segments
     if is_segments && !has_result {
         let hls_src = format!("/api/playlist?videoId={video_id}&videoType=segments-master");
-        return Ok(render_hls_page(&name, &hls_src).into_response());
+        return Ok(render_hls_page(&name, &hls_src, downloads_enabled).into_response());
     }
 
     // mp4 native
     let mp4_src = format!("/api/playlist?videoId={video_id}&videoType=mp4");
-    Ok(render_mp4_page(&name, &mp4_src).into_response())
+    Ok(render_mp4_page(&name, &mp4_src, downloads_enabled).into_response())
 }
 
 fn share_css() -> &'static str {
@@ -371,24 +380,28 @@ fn render_shell(name: &str, media: &str) -> Html<String> {
 fn render_image_page(name: &str, src: &str) -> Html<String> {
     let src = ui::html_escape(src);
     let alt = ui::html_escape(name);
-    render_shell(
-        name,
-        &format!(r#"<img src="{src}" alt="{alt}" />"#),
-    )
+    render_shell(name, &format!(r#"<img src="{src}" alt="{alt}" />"#))
 }
 
-fn render_mp4_page(name: &str, src: &str) -> Html<String> {
+fn render_mp4_page(name: &str, src: &str, downloads_enabled: bool) -> Html<String> {
     let src = ui::html_escape(src);
-    render_shell(
-        name,
-        &format!(r#"<video controls autoplay playsinline src="{src}"></video>"#),
-    )
+    let controls = if downloads_enabled {
+        "controls autoplay playsinline"
+    } else {
+        "controls autoplay playsinline controlslist=\"nodownload\" oncontextmenu=\"return false;\""
+    };
+    render_shell(name, &format!(r#"<video {controls} src="{src}"></video>"#))
 }
 
-fn render_hls_page(name: &str, src: &str) -> Html<String> {
+fn render_hls_page(name: &str, src: &str, downloads_enabled: bool) -> Html<String> {
     let src = js_escape(src);
+    let controls = if downloads_enabled {
+        "controls autoplay playsinline"
+    } else {
+        "controls autoplay playsinline controlslist=\"nodownload\" oncontextmenu=\"return false;\""
+    };
     let media = format!(
-        r##"<video id="video" controls autoplay playsinline></video>
+        r##"<video id="video" {controls}></video>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
 <script>
   const video = document.getElementById('video');
@@ -401,6 +414,7 @@ fn render_hls_page(name: &str, src: &str) -> Html<String> {
     video.src = src;
   }}
 </script>"##,
+        controls = controls,
         src = src,
     );
     render_shell(name, &media)

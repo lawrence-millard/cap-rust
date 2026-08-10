@@ -3,6 +3,7 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect};
 use serde::Deserialize;
 
+use crate::auth;
 use crate::error::ApiError;
 use crate::routes::ui::{self, LOGO_SVG};
 use crate::state::AppState;
@@ -61,7 +62,7 @@ pub async fn request_post(
                 )
                     .into_response());
             }
-            match crate::auth::register_user(&state.db, &username, &form.password).await {
+            match auth::register_user(&state.db, &username, &form.password).await {
                 Ok(uid) => uid,
                 Err(e) => {
                     return Ok((
@@ -77,7 +78,7 @@ pub async fn request_post(
                 }
             }
         }
-        "login" => match crate::auth::login_user(&state.db, &username, &form.password).await {
+        "login" => match auth::login_user(&state.db, &username, &form.password).await {
             Ok(uid) => uid,
             Err(_) => {
                 return Ok((
@@ -96,13 +97,7 @@ pub async fn request_post(
     };
 
     // mint an API key for the desktop device
-    let key = uuid::Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO auth_api_keys (id, user_id, source) VALUES ($1, $2, 'desktop')")
-        .bind(&key)
-        .bind(&user_id)
-        .execute(&state.db)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let key = auth::mint_api_key(&state.db, &user_id, "desktop").await?;
 
     let params = format!("type=api_key&api_key={key}&user_id={user_id}");
 
