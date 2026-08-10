@@ -12,7 +12,7 @@ use crate::state::AppState;
 
 const VIDEO_CREATE_SQL: &str =
     "INSERT INTO videos (id, owner_id, name, source, public, is_screenshot, duration, width, height, fps, created_at, storage_backend)
-     VALUES ($1, $2, $3, $4, true, $5, $6, $7, $8, $9, to_timestamp($10), $11)
+     VALUES ($1, $2, $3, $4, $12, $5, $6, $7, $8, $9, to_timestamp($10), $11)
      ON CONFLICT (id) DO UPDATE
      SET name = $3, source = $4, is_screenshot = $5, duration = $6, width = $7, height = $8, fps = $9
      WHERE videos.owner_id = EXCLUDED.owner_id
@@ -141,6 +141,7 @@ pub async fn video_create(
         .bind(query.fps)
         .bind(now)
         .bind(state.config.storage_backend_name())
+        .bind(state.config.video_default_public)
         .fetch_optional(&state.db)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;

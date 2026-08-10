@@ -4,9 +4,14 @@
 [![Docker](https://github.com/lawrence-millard/cap-rust/actions/workflows/docker.yml/badge.svg)](https://github.com/lawrence-millard/cap-rust/actions/workflows/docker.yml)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 
-Lightweight CAP-compatible server in Rust. Cap Desktop can sign in, record,
-upload, share, and play recordings against one service backed by Postgres and
-local disk, with beta direct `desktopMP4` S3 storage.
+Lightweight **1.0** CAP-compatible server in Rust. Cap Desktop can sign in,
+record, upload, share, and play recordings against one service backed by
+Postgres and local disk.
+
+**1.0 support commitment:** the local-storage Cap Desktop surface (auth, upload,
+share, Instant Mode, collaboration, password access) is stable. Breaking changes
+require a new major version. S3 storage remains experimental and is outside that
+commitment.
 
 ## Features
 
@@ -132,6 +137,7 @@ Put server behind HTTPS, then set Cap Desktop's Cap Server URL to `WEB_URL`.
 | `SIGN_SECRET` | yes | none | At least 16 characters; rejects known placeholders; signs JWTs and local upload/media URLs |
 | `WEB_URL` | no | `http://localhost:8080` | Public server URL, without trailing slash |
 | `CORS_ORIGINS` | no | none | Extra allowed CORS origins (comma-separated); `WEB_URL` is always allowed |
+| `VIDEO_DEFAULT_PUBLIC` | no | `true` | New recordings world-readable; set `false` for private-by-default |
 | `CAP_SIGNUPS` | no | `true` | Set `false` or `0` to disable new accounts (compose defaults to `false`) |
 | `CAP_PLAN_UPGRADED` | no | `true` | Plan value returned to Cap Desktop |
 | `JWT_TTL` | no | `2592000` | JWT lifetime in seconds |
@@ -148,16 +154,16 @@ Put server behind HTTPS, then set Cap Desktop's Cap Server URL to `WEB_URL`.
 | `FFMPEG_PATH` | no | `ffmpeg` | Instant Mode muxer executable |
 | `RUST_LOG` | no | `info` | Tracing filter |
 
-### S3 beta and limitations
+### S3 experimental (outside 1.0 support)
 
-S3 is a beta path for direct, single-part `desktopMP4` uploads and reads through
-SigV4 presigned GET/PUT URLs. Screenshots, Instant Mode segments, multipart
-uploads, captions, and object deletion are not supported S3 workflows. Caption
-deletion is rejected for S3-backed videos so existing DB rows are not removed
-while remote objects remain. Use local storage for full route support and
-production deployments. Native S3 multipart APIs, object listing/deletion,
-remote `ffmpeg` input/output, temporary credentials, session tokens, and
-credential refresh are not implemented.
+S3 is an experimental path for direct, single-part `desktopMP4` uploads and reads
+through SigV4 presigned GET/PUT URLs. It is **not** covered by the 1.0 stability
+commitment. Screenshots, Instant Mode segments, multipart uploads, captions, and
+object deletion are not supported S3 workflows. Caption deletion is rejected for
+S3-backed videos so existing DB rows are not removed while remote objects remain.
+Use local storage for full route support and production deployments. Native S3
+multipart APIs, object listing/deletion, remote `ffmpeg` input/output, temporary
+credentials, session tokens, and credential refresh are not implemented.
 
 ## Migrations and backup
 
@@ -195,6 +201,10 @@ bash scripts/contract-test.sh
   cross-origin framing so share links can be embedded on other sites.
 - Non-public signed media responses use `Cache-Control: private, no-store`.
 - CORS is limited to `WEB_URL` plus optional `CORS_ORIGINS`.
+- Cap Desktop delivers API keys in a redirect query string by protocol; prefer
+  HTTPS and short-lived network exposure of the origin.
+- New recordings default to public (`VIDEO_DEFAULT_PUBLIC=true`) so Cap share
+  links work immediately; set `false` if that is undesired.
 
 ## Notes
 

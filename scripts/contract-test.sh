@@ -35,6 +35,13 @@ check() {
 
 echo "== auth =="
 
+SUFFIX="${CONTRACT_SUFFIX:-$(date +%s)-$$}"
+DESKTOP_USER="contract-${SUFFIX}"
+JSON_USER="json-${SUFFIX}"
+# usernames must stay within 3-32 chars
+DESKTOP_USER="${DESKTOP_USER:0:32}"
+JSON_USER="${JSON_USER:0:32}"
+
 # GET session/request should serve the login/register page
 CODE=$(curl -s -o /tmp/body -w "%{http_code}" "$BASE/api/desktop/session/request?type=api_key")
 check "session/request GET" "200" "$CODE"
@@ -42,7 +49,7 @@ grep -q "Connect Cap Desktop" /tmp/body && check "session page content" "found" 
 
 # Register a user via the desktop session form -> redirect with api_key
 LOCATION=$(curl -s -D - -o /dev/null -X POST "$BASE/api/desktop/session/request" \
-  -d "action=register&username=contract-test&password=test1234&port=9999" | tr -d '\r' | grep -i '^location:' | sed 's/^[Ll]ocation: //')
+  -d "action=register&username=${DESKTOP_USER}&password=test1234&port=9999" | tr -d '\r' | grep -i '^location:' | sed 's/^[Ll]ocation: //')
 echo "  location: $LOCATION"
 case "$LOCATION" in
   "http://127.0.0.1:9999/?type=api_key&api_key="*) check "register redirect" "loopback+type" "loopback+type" ;;
@@ -54,26 +61,26 @@ echo "  user_id: $USER_ID"
 
 # /api/auth/register JSON endpoint
 RESP=$(curl -s -X POST -H "Content-Type: application/json" \
-  -d '{"username":"json-test","password":"jsonpw1234"}' \
+  -d "{\"username\":\"${JSON_USER}\",\"password\":\"jsonpw1234\"}" \
   "$BASE/api/auth/register")
 check "json register has token" "token" "$(echo "$RESP" | json_get token 2>/dev/null || echo "missing")"
 JSON_TOKEN=$(echo "$RESP" | json_get token)
 
 # /api/auth/login JSON endpoint
 RESP=$(curl -s -X POST -H "Content-Type: application/json" \
-  -d '{"username":"contract-test","password":"test1234"}' \
+  -d "{\"username\":\"${DESKTOP_USER}\",\"password\":\"test1234\"}" \
   "$BASE/api/auth/login")
 check "json login has token" "token" "$(echo "$RESP" | json_get token 2>/dev/null || echo "missing")"
 
 # Invalid credentials rejected
 CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" \
-  -d '{"username":"contract-test","password":"wrongpass"}' \
+  -d "{\"username\":\"${DESKTOP_USER}\",\"password\":\"wrongpass\"}" \
   "$BASE/api/auth/login")
 check "bad login" "401" "$CODE"
 
 # Duplicate username rejected
 CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" \
-  -d '{"username":"contract-test","password":"test1234"}' \
+  -d "{\"username\":\"${DESKTOP_USER}\",\"password\":\"test1234\"}" \
   "$BASE/api/auth/register")
 check "duplicate register" "400" "$CODE"
 
@@ -125,7 +132,7 @@ UPLOAD_URL=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.std
 
 # Upload a small real mp4
 ffmpeg -y -f lavfi -i testsrc=duration=1:size=160x120:rate=10 -c:v libx264 -preset ultrafast -pix_fmt yuv420p /tmp/contract.mp4 >/dev/null 2>&1
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -T /tmp/contract.mp4 "$UPLOAD_URL")
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT -T /tmp/contract.mp4 "$UPLOAD_URL")
 check "PUT upload" "200" "$CODE"
 
 RESP=$(curl -s -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \

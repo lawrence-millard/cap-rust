@@ -47,7 +47,35 @@ jobs:
       - name: test (integration)
         env:
           DATABASE_URL: postgres://cap:cap@localhost:5432/cap_test
-        run: cargo test --locked -- --ignored
+        run: cargo test --locked -- --ignored --test-threads=1
+
+      - name: install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: contract tests
+        env:
+          DATABASE_URL: postgres://cap:cap@localhost:5432/cap_test
+          WEB_URL: http://127.0.0.1:8080
+          SIGN_SECRET: ci-contract-secret-ci-contract
+          CAP_SIGNUPS: "true"
+          STORAGE_DIR: /tmp/cap-contract-storage
+          PORT: "8080"
+          RUST_LOG: warn
+        run: |
+          cargo build --locked
+          rm -rf "$STORAGE_DIR"
+          mkdir -p "$STORAGE_DIR"
+          ./target/debug/cap-server &
+          echo $! > /tmp/cap-server.pid
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8080/health >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8080/health
+          bash scripts/contract-test.sh
+          kill "$(cat /tmp/cap-server.pid)"
 
       - name: build
         run: cargo build --release --locked

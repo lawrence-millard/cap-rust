@@ -33,6 +33,7 @@ fn test_config() -> Config {
         storage_backend: cap_server::config::StorageBackend::Local,
         s3: None,
         cors_origins: Vec::new(),
+        video_default_public: true,
     }
 }
 

@@ -191,6 +191,7 @@ mod tests {
             storage_backend: crate::config::StorageBackend::Local,
             s3: None,
             cors_origins: Vec::new(),
+            video_default_public: true,
         };
         let signer = crate::sign::Signer::new(config.sign_secret.as_bytes());
         AppState {

@@ -24,6 +24,9 @@ pub struct Config {
     pub storage_backend: StorageBackend,
     pub s3: Option<S3Config>,
     pub cors_origins: Vec<String>,
+    /// Whether newly created recordings are world-readable. Cap Desktop expects
+    /// `true` so share links work immediately after upload.
+    pub video_default_public: bool,
 }
 
 const WEAK_SIGN_SECRETS: &[&str] = &[
@@ -98,6 +101,10 @@ impl Config {
             })
             .unwrap_or_default();
 
+        let video_default_public = env::var("VIDEO_DEFAULT_PUBLIC")
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(true);
+
         Config {
             database_url,
             web_url,
@@ -112,6 +119,7 @@ impl Config {
             storage_backend,
             s3,
             cors_origins,
+            video_default_public,
         }
     }
 
