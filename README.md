@@ -4,96 +4,173 @@
 [![Docker](https://github.com/lawrence-millard/cap-rust/actions/workflows/docker.yml/badge.svg)](https://github.com/lawrence-millard/cap-rust/actions/workflows/docker.yml)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 
-Lightweight, wire-compatible CAP server in Rust. Point Cap Desktop at it and record, upload, share, and play back — all from a single ~3 MB binary on a 1 vCPU / 1 GB VPS.
+Lightweight CAP-compatible server in Rust. Cap Desktop can sign in, record,
+upload, share, and play recordings against one service backed by Postgres and
+local disk, with beta direct `desktopMP4` S3 storage.
 
-No Next.js, no Node, no MySQL, no separate media server. Metadata lives in Neon Postgres; recordings land on local disk; signed URLs serve playback with range requests; ffmpeg muxes Instant Mode segments in the background.
+## Features
 
-## What works
+- Username/password account creation and login; Argon2 password hashes, JWTs,
+  per-device API keys, API-key listing, and revocation.
+- Cap Desktop session handshake, profile and plan responses, video creation,
+  upload progress, status polling, deletion, feedback/log compatibility sinks,
+  and storage/changelog compatibility responses.
+- Video list/get/update/delete, public/private visibility, metadata, owner
+  download, screenshots, MP4 playback, HLS playback for Instant Mode segments,
+  share pages, embeds, and oEmbed.
+- Signed single-part and batch PUT uploads. Local multipart initiate, part
+  upload, complete, abort, and abandoned-staging cleanup.
+- Background `ffmpeg` muxing of Instant Mode fMP4 segments into `result.mp4`,
+  with status/error reporting and a 30-minute job timeout.
+- Owner-managed WebVTT captions with language, label, enabled/default state,
+  signed upload/read URLs, and public enabled-caption listing.
+- Timestamped comments and one-level replies for authenticated users who can
+  see a video. Authors can edit; authors or video owners can delete.
+- Authenticated reaction toggles for `👍`, `❤️`, `😂`, `😮`, `😢`, and `🎉`,
+  plus public aggregate counts.
+- Cookie-deduplicated public views, counted once per visitor/video/day, with
+  owner totals and up to 366 daily buckets.
+- Per-video owner download-preference metadata and `GET /health` DB reachability
+  checks. Media handlers do not enforce that preference.
+- Automatic forward-only SQL migrations and graceful SIGINT/SIGTERM shutdown.
 
-- Desktop sign-in handshake (`/api/desktop/session/request`) with username/password login or account creation → API key → loopback redirect
-- `POST /api/auth/register` and `POST /api/auth/login` return a JWT for programmatic access
-- `user/profile`, `plan`, `organizations`, `s3/config/get`, `storage/integrations`, `changelog/status`
-- `video/create`, `video/progress`, `video/delete`
-- Uploads: single-part signed PUT, signed batch (Instant Mode segments), multipart initiate/presign-part/complete/abort, `recording-complete`
-- Playback: `/api/playlist` (mp4 + HLS segments), signed `/media` with `Range` support, share pages at `/s/{videoId}`
-- Instant Mode (desktopSegments) muxed to `result.mp4` via ffmpeg in the background; poll progress via `video/status`
-- `GET /health` reports liveness + DB reachability (200 ok / 503 degraded)
-- Graceful shutdown on SIGINT/SIGTERM; abandoned multipart upload staging dirs are swept hourly
+### Password access
 
-Not implemented (out of scope for a simple multi-user server): Stripe, email, comments, orgs/teams, Google Drive, transcription, web dashboard.
+Account passwords work for registration and login. Owners can set recording
+access to public, private, or password through `PATCH /api/videos/{videoId}/access`.
+Password share pages unlock through
+`POST /api/public/videos/{videoId}/access/unlock`; a signed HttpOnly cookie grants
+share, embed, playlist, and collaboration access for 15 minutes. Generated media
+URLs remain bearer URLs until they expire.
+
+## Routes
+
+Authentication is enforced per handler. Account/session, oEmbed, playlist,
+changelog, and `/api/public/*` routes are unauthenticated; owner and
+authenticated collaboration routes accept a JWT or API key.
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `GET` | `/health` | Liveness and Postgres reachability |
+| `GET` | `/s/{videoId}`, `/embed/{videoId}` | Public share and embed pages |
+| `GET` | `/media/{key}` | Signed local-media read with single-range support |
+| `PUT`, `POST` | `/up/{key}` | Signed local-media upload |
+| `GET`, `POST` | `/api/desktop/session/request` | Desktop browser sign-in/account creation and API-key redirect |
+| `POST` | `/api/auth/register`, `/api/auth/login` | JWT registration and login |
+| `GET` | `/api/oembed` | Public oEmbed response for local public share/embed URLs |
+| `GET` | `/api/videos`, `/api/videos/{videoId}` | Owner video list/detail |
+| `PATCH`, `DELETE` | `/api/videos/{videoId}` | Owner metadata/visibility update or deletion |
+| `GET` | `/api/videos/{videoId}/status`, `/download` | Owner upload/mux status and signed download |
+| `GET`, `POST` | `/api/videos/{videoId}/captions` | Owner caption list/create |
+| `PUT`, `PATCH`, `DELETE` | `/api/videos/{videoId}/captions/{captionId}` | Owner caption update/delete |
+| `GET`, `POST` | `/api/videos/{videoId}/comments` | Visible-video comment list/create |
+| `GET`, `PATCH`, `DELETE` | `/api/videos/{videoId}/comments/{commentId}` | Comment detail/update/delete |
+| `GET`, `PUT` | `/api/videos/{videoId}/reactions` | Authenticated reaction aggregates/toggle |
+| `GET` | `/api/videos/{videoId}/views` | Owner view totals |
+| `GET`, `PATCH` | `/api/videos/{videoId}/collaboration` | Owner download-preference metadata |
+| `GET` | `/api/public/videos/{videoId}/captions`, `/reactions`, `/collaboration` | Public collaboration data |
+| `POST` | `/api/public/videos/{videoId}/views` | Record public view |
+| `PATCH` | `/api/videos/{videoId}/access` | Set public, private, or password recording access |
+| `POST` | `/api/public/videos/{videoId}/access/unlock` | Unlock password recording for 15 minutes |
+| `GET`, `DELETE` | `/api/api-keys`, `/api/api-keys/{keyId}` | List and revoke caller's API keys |
+| `GET` | `/api/desktop/user/profile`, `/plan`, `/organizations`, `/s3/config/get`, `/storage/integrations` | Desktop compatibility data; organizations are empty and storage config points Desktop at this server |
+| `GET`, `DELETE`, `POST` | `/api/desktop/video/create`, `/video/status`, `/video/delete`, `/video/progress` | Desktop video lifecycle |
+| `POST` | `/api/desktop/feedback`, `/logs` | Authenticated compatibility sinks; payloads are not retained |
+| `POST` | `/api/upload/signed`, `/signed/batch` | Signed local upload URLs |
+| `POST` | `/api/upload/multipart/initiate`, `/presign-part`, `/complete`, `/abort` | Local multipart lifecycle |
+| `POST` | `/api/upload/recording-complete` | Queue Instant Mode mux |
+| `GET` | `/api/playlist` | Public MP4 redirect or generated segment playlist |
+| `GET` | `/api/changelog`, `/changelog/status` | Empty/no-update Desktop compatibility responses |
+
+## Limits
+
+- Upload body or completed multipart object: 20 GiB maximum.
+- Multipart: 10,000 parts maximum, 5 GiB per part, contiguous part numbers.
+- Signed batch: 10,000 paths maximum. Upload URLs last 1 hour; generated media
+  and caption read URLs last 24 hours.
+- Instant Mode: 8 MiB manifest, 100,000 total segments, and 30-minute mux
+  timeout. `ffmpeg` is required.
+- Video and comment page size: 1-100, default 50. Comment offset: 0-10,000.
+- Video name: 1-200 bytes. Metadata JSON: object up to 64 KiB.
+- Comment: 1-2,000 bytes; timestamp from 0 to 86,400,000 ms. Replies may
+  target top-level comments only.
+- Caption language: 2-35 ASCII letters, digits, or hyphens. Label: 1-100
+  bytes. Only one enabled default caption per video.
+- Username: 3-32 bytes, case-sensitive. Account password: at least 8 bytes.
+  JWT default lifetime: 30 days.
+- Media supports one HTTP byte range per request, not multipart ranges.
 
 ## Quick start
 
-Download a prebuilt static binary from [Releases](https://github.com/lawrence-millard/cap-rust/releases), or pull the Docker image:
+Download a binary from [Releases](https://github.com/lawrence-millard/cap-rust/releases),
+pull `ghcr.io/lawrence-millard/cap-rust:latest`, or build:
 
 ```bash
-docker pull ghcr.io/lawrence-millard/cap-rust:latest
-```
-
-Or build from source:
-
-```bash
-cp .env.example .env   # edit DATABASE_URL, WEB_URL, SIGN_SECRET
+cp .env.example .env
 cargo build --release
+set -a; . ./.env; set +a
 ./target/release/cap-server
 ```
 
-Or with Docker Compose (pulls the published image):
+Generate `SIGN_SECRET` with `openssl rand -hex 32`. Bare binaries need
+`ffmpeg` on `PATH`; Docker image includes it. Docker Compose:
 
 ```bash
-cp .env.example .env   # edit the values
 docker compose up -d
 ```
 
-Generate a strong `SIGN_SECRET`:
+Put server behind HTTPS, then set Cap Desktop's Cap Server URL to `WEB_URL`.
 
-```bash
-openssl rand -hex 32
-```
-
-## Environment variables
+## Configuration
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
-| `DATABASE_URL` | yes | — | Postgres connection string |
-| `WEB_URL` | yes | — | Public URL of this server, e.g. `https://cap.example.com` |
-| `SIGN_SECRET` | yes | — | Long random string (min 16 chars); signs upload/playback URLs and JWT tokens. Required — server refuses to start without it. |
-| `CAP_SIGNUPS` | no | `true` | If `false`, registration is disabled — only existing accounts can log in from the desktop connect page. |
-| `JWT_TTL` | no | `2592000` | JWT token lifetime in seconds (default 30 days). |
-| `DB_MAX_CONNECTIONS` | no | `5` | Postgres connection pool size. |
-| `STORAGE_DIR` | no | `./data` | Where recordings are stored |
+| `DATABASE_URL` | yes | none | Postgres connection string |
+| `SIGN_SECRET` | yes | none | At least 16 characters; signs JWTs and local upload/media URLs |
+| `WEB_URL` | no | `http://localhost:8080` | Public server URL, without trailing slash |
+| `CAP_SIGNUPS` | no | `true` | Set `false` or `0` to disable new accounts |
+| `CAP_PLAN_UPGRADED` | no | `true` | Plan value returned to Cap Desktop |
+| `JWT_TTL` | no | `2592000` | JWT lifetime in seconds |
+| `DB_MAX_CONNECTIONS` | no | `5` | Postgres pool maximum; values below 1 become 1 |
+| `STORAGE_BACKEND` | no | `local` | `local` or `s3`; see S3 limitations below |
+| `STORAGE_DIR` | no | `./data` | Local recordings and multipart staging directory |
+| `S3_ENDPOINT` | for `s3` | none | HTTP(S) S3-compatible endpoint |
+| `S3_REGION` | for `s3` | none | SigV4 region |
+| `S3_BUCKET` | for `s3` | none | Bucket name |
+| `S3_ACCESS_KEY` | for `s3` | none | SigV4 access key |
+| `S3_SECRET_KEY` | for `s3` | none | SigV4 secret key |
+| `S3_PATH_STYLE` | no | `false` | `true`/`1` for path-style presigned URLs |
 | `PORT` | no | `8080` | HTTP listen port |
-| `FFMPEG_PATH` | no | `ffmpeg` | ffmpeg binary for Instant Mode muxing |
-| `RUST_LOG` | no | `info` | Log level |
+| `FFMPEG_PATH` | no | `ffmpeg` | Instant Mode muxer executable |
+| `RUST_LOG` | no | `info` | Tracing filter |
 
-## Deploy to a VPS
+### S3 beta and limitations
 
-With Docker Compose behind Caddy (recommended):
+S3 is a beta path for direct, single-part `desktopMP4` uploads and reads through
+SigV4 presigned GET/PUT URLs. Screenshots, Instant Mode segments, multipart
+uploads, captions, and object deletion are not supported S3 workflows. Caption
+deletion is rejected for S3-backed videos so existing DB rows are not removed
+while remote objects remain. Use local storage for full route support and
+production deployments. Native S3 multipart APIs, object listing/deletion,
+remote `ffmpeg` input/output, temporary credentials, session tokens, and
+credential refresh are not implemented.
 
+## Migrations and backup
+
+Embedded migrations run automatically at startup before HTTP serving. They are
+forward-only; back up before upgrading. For a consistent backup, stop writes
+(normally stop server), then back up both Postgres and `STORAGE_DIR`:
+
+```bash
+pg_dump --format=custom "$DATABASE_URL" --file=cap-server.dump
+tar -C "$(dirname "$STORAGE_DIR")" -czf cap-storage.tar.gz "$(basename "$STORAGE_DIR")"
 ```
-docker-compose.yml   # runs the app
-Caddyfile            # automatic HTTPS for your domain
-```
 
-1. Point your domain's DNS A record at the VPS.
-2. Set the env vars in your shell or `.env`.
-3. `docker compose up -d && caddy start`
-4. In Cap Desktop → Settings → Cap Server URL → your `https://domain`.
-5. The connect page opens in your browser — create an account or log in.
-
-The prebuilt release binaries and Docker image both need `ffmpeg` on `PATH` for Instant Mode muxing (already included in the Docker image; install it yourself when using the bare binary).
-
-Example `Caddyfile`:
-
-```
-cap.example.com {
-    reverse_proxy localhost:8080
-}
-```
+Restore using standard `pg_restore` and filesystem extraction into an empty
+target, with server stopped. This project does not provide automated rollback,
+point-in-time recovery, or repair tooling.
 
 ## Contract tests
-
-Simulates the exact requests Cap Desktop makes (shapes from `packages/web-api-contract/src/desktop.ts` and `apps/desktop/src-tauri/src/api.rs`):
 
 ```bash
 DATABASE_URL=... WEB_URL=... SIGN_SECRET=... CAP_SIGNUPS=true STORAGE_DIR=./data ./target/debug/cap-server &
@@ -102,13 +179,18 @@ bash scripts/contract-test.sh
 
 ## Security
 
-- Always set a strong `SIGN_SECRET`. Set `CAP_SIGNUPS=false` on any internet-facing instance where you don't want open registration.
-- Serve over HTTPS (Caddy example below) — signed URLs, API keys, and JWTs are bearer credentials.
-- Passwords are hashed with Argon2; API keys and JWTs are per-user.
-- The Docker image runs as a non-root user; recordings live in the `cap-data` volume.
+- Use HTTPS. JWTs, API keys, and signed URLs are bearer credentials.
+- Use strong `SIGN_SECRET`; set `CAP_SIGNUPS=false` when open registration is
+  unwanted.
+- Recordings use `{STORAGE_DIR}/{user}/{video}/...`; signed URL paths are
+  traversal-checked and uploads publish through atomic rename.
+- Share, embed, playlist, public collaboration, and view routes enforce current
+  public/private/password access mode. Share and embed pages intentionally allow
+  cross-origin framing so share links can be embedded on other sites.
 
 ## Notes
 
-- The Neon `channel_binding=require` connection parameter is stripped automatically.
-- Recordings are stored under `{STORAGE_DIR}/{user}/{video}/…` mirroring Cap's S3 keys (`result.mp4`, `raw-upload.mp4`, `segments/…`), so each user's recordings are isolated on disk.
-- Share links are only served for videos where `public` is true (the default). Recordings uploaded before multi-user support are owned by the legacy built-in user `u_single_user`.
+- Neon `channel_binding` query parameters are stripped because sqlx does not
+  support them.
+- Existing pre-multi-user recordings belong to legacy user `u_single_user`.
+- See [CHANGELOG.md](CHANGELOG.md) for release changes.

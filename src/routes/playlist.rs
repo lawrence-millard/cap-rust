@@ -1,12 +1,28 @@
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect};
 use serde::Deserialize;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::error::ApiError;
+use crate::routes::access;
 use crate::state::AppState;
 use crate::storage;
+
+fn read_url(state: &AppState, backend: &str, key: &str) -> Result<String, ApiError> {
+    match backend {
+        "local" => Ok(state.signer.get_url(&state.config.web_url, key, 86400)),
+        "s3" => state
+            .config
+            .s3
+            .as_ref()
+            .ok_or_else(|| ApiError::Internal("S3 backend is not configured".into()))?
+            .presign_get_now(key, Duration::from_secs(86400))
+            .map_err(|e| ApiError::Internal(e.to_string())),
+        _ => Err(ApiError::Internal("invalid video storage backend".into())),
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -21,12 +37,13 @@ pub struct PlaylistParams {
 pub async fn get(
     State(state): State<Arc<AppState>>,
     Query(params): Query<PlaylistParams>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let video_id = &params.video_id;
 
     // fetch video
-    let row = sqlx::query_as::<_, (String, String, Option<serde_json::Value>, bool, Option<f64>, Option<i32>, Option<i32>, Option<f64>)>(
-        "SELECT id, owner_id, source, is_screenshot, duration, width, height, fps FROM videos WHERE id = $1 AND public = true",
+    let row = sqlx::query_as::<_, (String, String, Option<serde_json::Value>, bool, Option<f64>, Option<i32>, Option<i32>, Option<f64>, String, String)>(
+        "SELECT id, owner_id, source, is_screenshot, duration, width, height, fps, access_mode, storage_backend FROM videos WHERE id = $1",
     )
     .bind(video_id)
     .fetch_optional(&state.db)
@@ -34,10 +51,19 @@ pub async fn get(
     .map_err(|e| ApiError::Internal(e.to_string()))?
     .ok_or(ApiError::NotFound)?;
 
+    if !access::policy_allows(&row.8, &row.1, video_id, &headers, None, &state.signer) {
+        return Err(ApiError::NotFound);
+    }
+
     let owner_id = &row.1;
+    let backend = &row.9;
 
     match params.video_type.as_str() {
         "mp4" => {
+            if backend == "s3" {
+                let key = format!("{owner_id}/{video_id}/result.mp4");
+                return Ok(Redirect::to(&read_url(&state, backend, &key)?).into_response());
+            }
             // try result.mp4, then raw-upload.mp4
             let key = format!("{owner_id}/{video_id}/result.mp4");
             if storage::exists(&state, &key) {
@@ -154,6 +180,9 @@ pub async fn get(
         }
         "raw-preview" => {
             let key = format!("{owner_id}/{video_id}/raw-upload.mp4");
+            if backend == "s3" {
+                return Ok(Redirect::to(&read_url(&state, backend, &key)?).into_response());
+            }
             if storage::exists(&state, &key) {
                 let url = state.signer.get_url(&state.config.web_url, &key, 86400);
                 return Ok(Redirect::to(&url).into_response());

@@ -39,10 +39,10 @@ pub async fn ensure_parent(state: &AppState, key: &str) -> Result<(), ApiError> 
 
 pub async fn remove_dir_all(state: &AppState, key: &str) -> Result<(), ApiError> {
     let path = resolve(state, key)?;
-    if path.exists() {
-        tokio::fs::remove_dir_all(&path)
-            .await
-            .map_err(|e| ApiError::Internal(format!("rmdir: {e}")))?;
+    if let Err(error) = tokio::fs::remove_dir_all(&path).await
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(ApiError::Internal(format!("rmdir: {error}")));
     }
     Ok(())
 }
@@ -79,8 +79,10 @@ pub async fn touch_staging_activity_for_key(state: &AppState, key: &str) {
     if parts.next() != Some("staging") {
         return;
     }
-    if let Some(upload_id) = parts.next() {
-        let _ = touch_staging_activity(state, upload_id).await;
+    if let Some(upload_id) = parts.next()
+        && let Err(error) = touch_staging_activity(state, upload_id).await
+    {
+        tracing::warn!("failed to refresh staging activity: {error}");
     }
 }
 
@@ -92,14 +94,29 @@ pub async fn touch_staging_activity_for_key(state: &AppState, key: &str) {
 pub async fn cleanup_staging(state: &AppState, max_age_secs: u64) {
     let staging = match resolve(state, "staging") {
         Ok(p) => p,
-        Err(_) => return,
+        Err(error) => {
+            tracing::error!("failed to resolve staging directory: {error}");
+            return;
+        }
     };
     let now = std::time::SystemTime::now();
     let mut entries = match tokio::fs::read_dir(&staging).await {
         Ok(e) => e,
-        Err(_) => return,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            tracing::error!("failed to read staging directory: {error}");
+            return;
+        }
     };
-    while let Ok(Some(entry)) = entries.next_entry().await {
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(error) => {
+                tracing::error!("failed to read staging entry: {error}");
+                break;
+            }
+        };
         if !entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
             continue;
         }
@@ -113,7 +130,9 @@ pub async fn cleanup_staging(state: &AppState, max_age_secs: u64) {
                 "cleaning stale staging dir: {}",
                 entry.file_name().to_string_lossy()
             );
-            let _ = tokio::fs::remove_dir_all(entry.path()).await;
+            if let Err(error) = tokio::fs::remove_dir_all(entry.path()).await {
+                tracing::error!("failed to clean stale staging directory: {error}");
+            }
         }
     }
 }
@@ -149,6 +168,8 @@ mod tests {
             ffmpeg_path: "ffmpeg".into(),
             plan_upgraded: true,
             db_max_connections: 5,
+            storage_backend: crate::config::StorageBackend::Local,
+            s3: None,
         };
         let signer = crate::sign::Signer::new(config.sign_secret.as_bytes());
         AppState {
@@ -160,10 +181,8 @@ mod tests {
     }
 
     fn temp_storage() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "cap-rust-storage-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("cap-rust-storage-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -240,10 +259,7 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(2)).await;
         cleanup_staging(&state, 1).await;
 
-        assert!(
-            !staging_dir.exists(),
-            "stale staging dir should be removed"
-        );
+        assert!(!staging_dir.exists(), "stale staging dir should be removed");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

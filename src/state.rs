@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sqlx::postgres::PgPoolOptions;
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
 use crate::config::Config;
@@ -21,8 +22,9 @@ impl AppState {
     pub async fn new(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
         let db = PgPoolOptions::new()
             .max_connections(config.db_max_connections.max(1))
-            .connect(&config.database_url)
-            .await?;
+            .acquire_timeout(Duration::from_secs(10));
+        let db = tokio::time::timeout(Duration::from_secs(10), db.connect(&config.database_url))
+            .await??;
 
         let signer = Signer::new(config.sign_secret.as_bytes());
 
@@ -35,14 +37,8 @@ impl AppState {
     }
 }
 
-impl std::convert::From<Arc<AppState>> for AppState {
-    fn from(state: Arc<AppState>) -> Self {
-        (*state).clone()
-    }
-}
-
 /// Tracks background mux tasks so graceful shutdown can drain (or fail) them.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct MuxJobs {
     inner: Arc<MuxJobsInner>,
 }
@@ -50,6 +46,15 @@ pub struct MuxJobs {
 struct MuxJobsInner {
     shutting_down: AtomicBool,
     active: Mutex<Vec<(String, JoinHandle<()>)>>,
+    permits: Arc<Semaphore>,
+}
+
+impl Default for MuxJobs {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(MuxJobsInner::default()),
+        }
+    }
 }
 
 impl Default for MuxJobsInner {
@@ -57,6 +62,7 @@ impl Default for MuxJobsInner {
         Self {
             shutting_down: AtomicBool::new(false),
             active: Mutex::new(Vec::new()),
+            permits: Arc::new(Semaphore::new(1)),
         }
     }
 }
@@ -77,7 +83,12 @@ impl MuxJobs {
         if self.is_shutting_down() {
             return false;
         }
-        let handle = tokio::spawn(fut);
+        let permits = self.inner.permits.clone();
+        let handle = tokio::spawn(async move {
+            if let Ok(_permit) = permits.acquire_owned().await {
+                fut.await;
+            }
+        });
         active.retain(|(_, h)| !h.is_finished());
         active.push((video_id, handle));
         true

@@ -70,7 +70,7 @@ pub async fn login(
         .ok_or(ApiError::Unauthorized)?;
 
     let hash = row.4.ok_or(ApiError::Unauthorized)?;
-    if !auth::verify_password(&body.password, &hash) {
+    if !auth::verify_password(&body.password, &hash).await {
         return Err(ApiError::Unauthorized);
     }
 

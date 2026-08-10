@@ -36,7 +36,30 @@ async fn main() {
     )
     .execute(&state.db)
     .await
-    .ok();
+    .expect("failed to ensure legacy default user");
+
+    match routes::upload::recover_stale_mux_jobs(&state).await {
+        Ok(count) if count > 0 => tracing::info!(count, "reclaimed stale mux jobs"),
+        Ok(_) => {}
+        Err(e) => tracing::error!("stale mux recovery failed: {e}"),
+    }
+
+    // Reclaim one bounded batch of stale mux work every hour.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                match routes::upload::recover_stale_mux_jobs(&state).await {
+                    Ok(count) if count > 0 => {
+                        tracing::info!(count, "reclaimed stale mux jobs")
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::error!("stale mux recovery failed: {e}"),
+                }
+            }
+        });
+    }
 
     // background task: sweep abandoned multipart staging dirs every hour
     {
@@ -63,10 +86,6 @@ async fn main() {
         .layer(SetResponseHeaderLayer::overriding(
             header::REFERRER_POLICY,
             HeaderValue::from_static("strict-origin-when-cross-origin"),
-        ))
-        .layer(SetResponseHeaderLayer::overriding(
-            header::X_FRAME_OPTIONS,
-            HeaderValue::from_static("SAMEORIGIN"),
         ))
         .layer(TraceLayer::new_for_http())
         .layer(cors);

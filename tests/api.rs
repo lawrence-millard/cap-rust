@@ -30,6 +30,8 @@ fn test_config() -> Config {
         ffmpeg_path: "ffmpeg".into(),
         plan_upgraded: true,
         db_max_connections: 5,
+        storage_backend: cap_server::config::StorageBackend::Local,
+        s3: None,
     }
 }
 

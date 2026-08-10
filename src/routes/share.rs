@@ -1,8 +1,10 @@
 use axum::extract::{Path, State};
+use axum::http::HeaderMap;
 use axum::response::{Html, IntoResponse};
 use std::sync::Arc;
 
 use crate::error::ApiError;
+use crate::routes::access;
 use crate::state::AppState;
 use crate::storage;
 
@@ -22,15 +24,23 @@ fn html_escape(s: &str) -> String {
 pub async fn video(
     State(state): State<Arc<AppState>>,
     Path(video_id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
-    let row = sqlx::query_as::<_, (String, String, Option<String>, Option<serde_json::Value>, bool, Option<f64>, Option<i32>, Option<i32>, Option<f64>, chrono::DateTime<chrono::Utc>)>(
-        "SELECT id, owner_id, name, source, is_screenshot, duration, width, height, fps, created_at FROM videos WHERE id = $1 AND public = true",
+    let row = sqlx::query_as::<_, (String, String, Option<String>, Option<serde_json::Value>, bool, Option<f64>, Option<i32>, Option<i32>, Option<f64>, chrono::DateTime<chrono::Utc>, String)>(
+        "SELECT id, owner_id, name, source, is_screenshot, duration, width, height, fps, created_at, access_mode FROM videos WHERE id = $1",
     )
     .bind(&video_id)
     .fetch_optional(&state.db)
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))?
     .ok_or(ApiError::NotFound)?;
+
+    if !access::policy_allows(&row.10, &row.1, &video_id, &headers, None, &state.signer) {
+        if row.10 == access::AccessMode::Password.as_str() {
+            return Ok(render_unlock_page(&video_id).into_response());
+        }
+        return Err(ApiError::NotFound);
+    }
 
     let name = html_escape(&row.2.unwrap_or_else(|| "Cap Recording".into()));
     let owner_id = &row.1;
@@ -65,6 +75,13 @@ pub async fn video(
     // mp4 native
     let mp4_src = format!("/api/playlist?videoId={video_id}&videoType=mp4");
     Ok(render_mp4_page(&name, &mp4_src).into_response())
+}
+
+fn render_unlock_page(video_id: &str) -> Html<String> {
+    let endpoint = html_escape(&format!("/api/public/videos/{video_id}/access/unlock"));
+    Html(format!(
+        r##"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Unlock recording</title><style>:root{{color-scheme:dark;font-family:system-ui,sans-serif}}body{{min-height:100vh;margin:0;display:grid;place-items:center;background:#0b0f19;color:#e2e8f0}}form{{display:grid;gap:12px;width:min(320px,calc(100% - 48px))}}input,button{{font:inherit;padding:12px;border-radius:8px}}button{{cursor:pointer}}p{{min-height:1.25em;margin:0;color:#fca5a5}}</style></head><body><form data-endpoint="{endpoint}"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required><button type="submit">Unlock</button><p role="alert"></p></form><script>document.querySelector('form').addEventListener('submit',async event=>{{event.preventDefault();const form=event.currentTarget;const response=await fetch(form.dataset.endpoint,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{password:form.password.value}})}});if(response.ok)location.reload();else form.querySelector('p').textContent='Incorrect password';}});</script></body></html>"##
+    ))
 }
 
 async fn find_screenshot(state: &Arc<AppState>, owner_id: &str, video_id: &str) -> Option<String> {

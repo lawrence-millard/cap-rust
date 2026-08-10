@@ -6,12 +6,14 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 
 use crate::error::ApiError;
 use crate::state::AppState;
 use crate::storage;
+
+const MAX_UPLOAD_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 
 #[derive(Deserialize)]
 pub struct SignedParams {
@@ -38,35 +40,89 @@ pub async fn put(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
     Query(params): Query<SignedParams>,
+    headers: HeaderMap,
     body: Body,
 ) -> Result<StatusCode, ApiError> {
     if !state.signer.verify("PUT", &key, params.exp, &params.sig) {
         return Err(ApiError::Unauthorized);
     }
+    let path = storage::resolve(&state, &key)?;
+    let content_length = headers
+        .get(header::CONTENT_LENGTH)
+        .map(|value| {
+            value
+                .to_str()
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| ApiError::BadRequest("invalid Content-Length".into()))
+        })
+        .transpose()?;
+    if content_length.is_some_and(|length| length > MAX_UPLOAD_BYTES) {
+        return Err(ApiError::BadRequest("upload exceeds 20 GiB limit".into()));
+    }
+
     storage::ensure_parent(&state, &key).await?;
     storage::touch_staging_activity_for_key(&state, &key).await;
-    let path = storage::resolve(&state, &key)?;
-
-    let mut file = fs::File::create(&path)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    // stream body to disk
-    let mut stream = body.into_data_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| ApiError::Internal(e.to_string()))?;
-        file.write_all(&chunk)
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-    }
-    file.flush()
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    write_upload_atomic(&path, body, content_length).await?;
 
     // Refresh again after the write so long part uploads keep the heartbeat fresh.
     storage::touch_staging_activity_for_key(&state, &key).await;
 
     Ok(StatusCode::OK)
+}
+
+async fn write_upload_atomic(
+    path: &std::path::Path,
+    body: Body,
+    content_length: Option<u64>,
+) -> Result<(), ApiError> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ApiError::BadRequest("invalid upload path".into()))?;
+    let temp_path = path.with_file_name(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let result = async {
+        let mut bytes_written = 0_u64;
+        let mut stream = body.into_data_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| ApiError::Internal(e.to_string()))?;
+            bytes_written = bytes_written
+                .checked_add(chunk.len() as u64)
+                .ok_or_else(|| ApiError::BadRequest("upload exceeds 20 GiB limit".into()))?;
+            if bytes_written > MAX_UPLOAD_BYTES {
+                return Err(ApiError::BadRequest("upload exceeds 20 GiB limit".into()));
+            }
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+        }
+        if content_length.is_some_and(|length| length != bytes_written) {
+            return Err(ApiError::BadRequest(
+                "Content-Length does not match body".into(),
+            ));
+        }
+        file.flush()
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        drop(file);
+        fs::rename(&temp_path, path)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))
+    }
+    .await;
+
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path).await;
+    }
+
+    result
 }
 
 fn content_type_for(path: &std::path::Path) -> &'static str {
@@ -160,7 +216,7 @@ async fn serve_file_with_range(
             tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(s))
                 .await
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
-            let reader = ReaderStream::with_capacity(file, 64 * 1024);
+            let reader = ReaderStream::with_capacity(file.take(len), 64 * 1024);
             let stream = Body::from_stream(reader);
             resp_builder = resp_builder
                 .status(StatusCode::PARTIAL_CONTENT)
@@ -226,6 +282,26 @@ impl From<axum::http::Error> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http_body_util::BodyExt;
+
+    fn temp_dir() -> std::path::PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("cap-rust-media-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn assert_no_upload_temp_files(dir: &std::path::Path) {
+        let entries = std::fs::read_dir(dir)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            entries
+                .iter()
+                .all(|entry| { !entry.file_name().to_string_lossy().ends_with(".tmp") })
+        );
+    }
 
     #[test]
     fn parse_range_full() {
@@ -301,5 +377,67 @@ mod tests {
     #[test]
     fn parse_range_trim_whitespace() {
         assert_eq!(parse_range(" 50 - 100 ", 200), Some((Some(50), Some(100))));
+    }
+
+    #[tokio::test]
+    async fn partial_range_body_stops_at_requested_end() {
+        let dir = temp_dir();
+        let path = dir.join("video.mp4");
+        fs::write(&path, b"0123456789").await.unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RANGE, "bytes=2-4".parse().unwrap());
+
+        let response = serve_file_with_range(&path, &headers).await.unwrap();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+
+        assert_eq!(&body[..], b"234");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn upload_replaces_target_only_after_complete_body() {
+        let dir = temp_dir();
+        let path = dir.join("object");
+        fs::write(&path, b"old").await.unwrap();
+
+        write_upload_atomic(&path, Body::from("new body"), Some(8))
+            .await
+            .unwrap();
+
+        assert_eq!(fs::read(&path).await.unwrap(), b"new body");
+        assert_no_upload_temp_files(&dir);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn content_length_mismatch_preserves_target_and_removes_temp() {
+        let dir = temp_dir();
+        let path = dir.join("object");
+        fs::write(&path, b"old").await.unwrap();
+
+        let result = write_upload_atomic(&path, Body::from("short"), Some(10)).await;
+
+        assert!(matches!(result, Err(ApiError::BadRequest(_))));
+        assert_eq!(fs::read(&path).await.unwrap(), b"old");
+        assert_no_upload_temp_files(&dir);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn body_error_preserves_target_and_removes_temp() {
+        let dir = temp_dir();
+        let path = dir.join("object");
+        fs::write(&path, b"old").await.unwrap();
+        let stream = futures_util::stream::iter([
+            Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"partial")),
+            Err(std::io::Error::other("body failed")),
+        ]);
+
+        let result = write_upload_atomic(&path, Body::from_stream(stream), None).await;
+
+        assert!(matches!(result, Err(ApiError::Internal(_))));
+        assert_eq!(fs::read(&path).await.unwrap(), b"old");
+        assert_no_upload_temp_files(&dir);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

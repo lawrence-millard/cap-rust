@@ -7,10 +7,13 @@ use axum::http::request::Parts;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+use tokio::sync::Semaphore;
 
 use crate::error::ApiError;
 use crate::state::AppState;
+
+static ARGON2_JOBS: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(4));
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct User {
@@ -38,12 +41,12 @@ struct Claims {
 impl<S> FromRequestParts<S> for CurrentUser
 where
     S: Send + Sync,
-    AppState: FromRef<S>,
+    Arc<AppState>: FromRef<S>,
 {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let app_state = AppState::from_ref(state);
+        let app_state = Arc::<AppState>::from_ref(state);
         let headers = &parts.headers;
         let bearer = headers
             .get("Authorization")
@@ -63,22 +66,42 @@ where
 }
 
 /// Hash a password with Argon2. Returns the encoded PHC string.
-pub fn hash_password(password: &str) -> Result<String, ApiError> {
-    let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
-        .map(|h| h.to_string())
-        .map_err(|e| ApiError::Internal(e.to_string()))
+pub async fn hash_password(password: &str) -> Result<String, ApiError> {
+    let permit = ARGON2_JOBS
+        .acquire()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let password = password.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let salt = SaltString::generate(&mut OsRng);
+        Argon2::default()
+            .hash_password(password.as_bytes(), &salt)
+            .map(|h| h.to_string())
+            .map_err(|e| ApiError::Internal(e.to_string()))
+    })
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?
 }
 
 /// Verify a password against an Argon2 PHC string.
-pub fn verify_password(password: &str, hash: &str) -> bool {
-    match PasswordHash::new(hash) {
-        Ok(parsed) => Argon2::default()
-            .verify_password(password.as_bytes(), &parsed)
-            .is_ok(),
-        Err(_) => false,
-    }
+pub async fn verify_password(password: &str, hash: &str) -> bool {
+    let Ok(permit) = ARGON2_JOBS.acquire().await else {
+        return false;
+    };
+    let password = password.to_owned();
+    let hash = hash.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        match PasswordHash::new(&hash) {
+            Ok(parsed) => Argon2::default()
+                .verify_password(password.as_bytes(), &parsed)
+                .is_ok(),
+            Err(_) => false,
+        }
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// Mint a JWT for a user id. Uses SIGN_SECRET as the HMAC key.
@@ -121,19 +144,12 @@ async fn lookup_user_by_jwt(app_state: &AppState, token: &str) -> Option<User> {
 }
 
 pub async fn lookup_user(db: &PgPool, token: &str) -> Result<User, ApiError> {
-    let user_id: Option<String> =
-        sqlx::query_scalar("SELECT user_id FROM auth_api_keys WHERE id = $1")
-            .bind(token)
-            .fetch_optional(db)
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    let user_id = user_id.ok_or(ApiError::Unauthorized)?;
-
     let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(
-        "SELECT id, name, email, username FROM users WHERE id = $1",
+        "SELECT users.id, users.name, users.email, users.username \
+         FROM auth_api_keys JOIN users ON users.id = auth_api_keys.user_id \
+         WHERE auth_api_keys.id = $1",
     )
-    .bind(&user_id)
+    .bind(token)
     .fetch_optional(db)
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))?
@@ -181,7 +197,7 @@ pub async fn register_user(
     }
 
     let user_id = uuid::Uuid::new_v4().to_string();
-    let password_hash = hash_password(password)?;
+    let password_hash = hash_password(password).await?;
 
     sqlx::query("INSERT INTO users (id, name, username, password_hash) VALUES ($1, $2, $3, $4)")
         .bind(&user_id)
@@ -209,14 +225,24 @@ pub async fn login_user(db: &PgPool, username: &str, password: &str) -> Result<S
     .ok_or(ApiError::Unauthorized)?;
 
     let hash = row.1.ok_or(ApiError::Unauthorized)?;
-    if !verify_password(password, &hash) {
+    if !verify_password(password, &hash).await {
         return Err(ApiError::Unauthorized);
     }
     Ok(row.0)
 }
 
-impl FromRef<Arc<AppState>> for AppState {
-    fn from_ref(input: &Arc<AppState>) -> Self {
-        (**input).clone()
+#[cfg(test)]
+mod tests {
+    use super::{hash_password, verify_password};
+
+    #[tokio::test]
+    async fn password_hash_roundtrip() {
+        let hash = hash_password("correct horse battery staple")
+            .await
+            .expect("hash password");
+
+        assert!(verify_password("correct horse battery staple", &hash).await);
+        assert!(!verify_password("wrong password", &hash).await);
+        assert!(!verify_password("correct horse battery staple", "invalid hash").await);
     }
 }

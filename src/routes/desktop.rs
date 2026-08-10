@@ -7,8 +7,16 @@ use std::sync::Arc;
 use crate::auth::CurrentUser;
 use crate::error::ApiError;
 use crate::routes::upload::get_now;
+use crate::routes::videos::delete_owned_video;
 use crate::state::AppState;
-use crate::storage;
+
+const VIDEO_CREATE_SQL: &str =
+    "INSERT INTO videos (id, owner_id, name, source, public, is_screenshot, duration, width, height, fps, created_at, storage_backend)
+     VALUES ($1, $2, $3, $4, true, $5, $6, $7, $8, $9, to_timestamp($10), $11)
+     ON CONFLICT (id) DO UPDATE
+     SET name = $3, duration = $6, width = $7, height = $8, fps = $9
+     WHERE videos.owner_id = EXCLUDED.owner_id
+     RETURNING id";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -108,28 +116,39 @@ pub async fn video_create(
     let recording_mode = query.recording_mode.as_deref().unwrap_or("desktopMP4");
     let source = serde_json::json!({"type": recording_mode});
     let is_screenshot = query.is_screenshot.as_deref() == Some("true");
+    if state.config.storage_backend_name() == "s3" {
+        if is_screenshot {
+            return Err(ApiError::BadRequest(
+                "S3 screenshot creation is not supported".into(),
+            ));
+        }
+        if recording_mode != "desktopMP4" {
+            return Err(ApiError::BadRequest(
+                "S3 supports only desktopMP4 recording creation".into(),
+            ));
+        }
+    }
     let name = query.name.clone().unwrap_or_else(|| "Cap Recording".into());
     let now = get_now();
 
-    sqlx::query(
-        "INSERT INTO videos (id, owner_id, name, source, public, is_screenshot, duration, width, height, fps, created_at)
-         VALUES ($1, $2, $3, $4, true, $5, $6, $7, $8, $9, to_timestamp($10))
-         ON CONFLICT (id) DO UPDATE
-         SET name = $3, duration = $6, width = $7, height = $8, fps = $9",
-    )
-    .bind(&video_id)
-    .bind(user.user_id())
-    .bind(&name)
-    .bind(&source)
-    .bind(is_screenshot)
-    .bind(query.duration_in_secs)
-    .bind(query.width)
-    .bind(query.height)
-    .bind(query.fps)
-    .bind(now)
-    .execute(&state.db)
-    .await
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let created_id = sqlx::query_scalar::<_, String>(VIDEO_CREATE_SQL)
+        .bind(&video_id)
+        .bind(user.user_id())
+        .bind(&name)
+        .bind(&source)
+        .bind(is_screenshot)
+        .bind(query.duration_in_secs)
+        .bind(query.width)
+        .bind(query.height)
+        .bind(query.fps)
+        .bind(now)
+        .bind(state.config.storage_backend_name())
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    if created_id.is_none() {
+        return Err(ApiError::Forbidden);
+    }
 
     if !is_screenshot {
         sqlx::query(
@@ -138,7 +157,7 @@ pub async fn video_create(
         .bind(&video_id)
         .execute(&state.db)
         .await
-        .ok();
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
     }
 
     Ok(Json(json!({
@@ -155,16 +174,22 @@ pub async fn video_progress(
     axum::extract::Json(body): axum::extract::Json<VideoProgressBody>,
 ) -> Result<Json<Value>, ApiError> {
     let video_id = &body.video_id;
+    if body.uploaded < 0 || body.total <= 0 {
+        return Err(ApiError::BadRequest(
+            "uploaded must be non-negative and total must be positive".into(),
+        ));
+    }
     let uploaded = body.uploaded.min(body.total);
     let total = body.total;
 
-    let owner: Option<String> = sqlx::query_scalar("SELECT owner_id FROM videos WHERE id = $1")
-        .bind(video_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let video: Option<(String, String)> =
+        sqlx::query_as("SELECT owner_id, storage_backend FROM videos WHERE id = $1")
+            .bind(video_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let owner = owner.ok_or(ApiError::NotFound)?;
+    let (owner, backend) = video.ok_or(ApiError::NotFound)?;
     if owner != user.user_id() {
         return Err(ApiError::Forbidden);
     }
@@ -173,7 +198,11 @@ pub async fn video_progress(
         "INSERT INTO video_uploads (video_id, uploaded, total, updated_at)
          VALUES ($1, $2, $3, now())
          ON CONFLICT (video_id) DO UPDATE
-         SET uploaded = $2, total = $3, updated_at = now()",
+         SET uploaded = GREATEST(video_uploads.uploaded, EXCLUDED.uploaded),
+             total = EXCLUDED.total,
+             updated_at = now()
+         WHERE EXCLUDED.uploaded > video_uploads.uploaded
+            OR EXCLUDED.total IS DISTINCT FROM video_uploads.total",
     )
     .bind(video_id)
     .bind(uploaded)
@@ -182,12 +211,15 @@ pub async fn video_progress(
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    if uploaded >= total {
-        sqlx::query("DELETE FROM video_uploads WHERE video_id = $1 AND mode = 'singlepart'")
-            .bind(video_id)
-            .execute(&state.db)
-            .await
-            .ok();
+    if uploaded >= total && backend != "s3" {
+        sqlx::query(
+            "DELETE FROM video_uploads
+             WHERE video_id = $1 AND mode = 'singlepart' AND uploaded >= total",
+        )
+        .bind(video_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
     }
 
     Ok(Json(json!(true)))
@@ -230,29 +262,7 @@ pub async fn video_delete(
 ) -> Result<Json<Value>, ApiError> {
     let video_id = &query.video_id;
 
-    let owner: Option<String> = sqlx::query_scalar("SELECT owner_id FROM videos WHERE id = $1")
-        .bind(video_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    if let Some(owner_id) = owner {
-        if owner_id != user.user_id() {
-            return Err(ApiError::Forbidden);
-        }
-        let key = format!("{}/{}", user.user_id(), video_id);
-        let _ = storage::remove_dir_all(&state, &key).await;
-        sqlx::query("DELETE FROM video_uploads WHERE video_id = $1")
-            .bind(video_id)
-            .execute(&state.db)
-            .await
-            .ok();
-        sqlx::query("DELETE FROM videos WHERE id = $1")
-            .bind(video_id)
-            .execute(&state.db)
-            .await
-            .ok();
-    }
+    delete_owned_video(&state, user.user_id(), video_id).await?;
 
     Ok(Json(json!(true)))
 }
@@ -265,7 +275,19 @@ pub async fn feedback(
 }
 
 pub async fn logs(
+    _user: CurrentUser,
     axum::extract::Form(_form): axum::extract::Form<serde_json::Value>,
 ) -> Json<Value> {
     Json(json!({"success": true}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VIDEO_CREATE_SQL;
+
+    #[test]
+    fn video_create_upsert_requires_same_owner_and_returns_row() {
+        assert!(VIDEO_CREATE_SQL.contains("WHERE videos.owner_id = EXCLUDED.owner_id"));
+        assert!(VIDEO_CREATE_SQL.contains("RETURNING id"));
+    }
 }
