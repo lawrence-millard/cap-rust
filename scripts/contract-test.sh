@@ -45,7 +45,7 @@ JSON_USER="${JSON_USER:0:32}"
 # GET session/request should serve the login/register page
 CODE=$(curl -s -o /tmp/body -w "%{http_code}" "$BASE/api/desktop/session/request?type=api_key")
 check "session/request GET" "200" "$CODE"
-grep -q "Connect Cap Desktop" /tmp/body && check "session page content" "found" "found" || check "session page content" "found" "missing"
+grep -q "Authorize Cap Desktop" /tmp/body && check "session page content" "found" "found" || check "session page content" "found" "missing"
 
 # Register a user via the desktop session form -> redirect with api_key
 LOCATION=$(curl -s -D - -o /dev/null -X POST "$BASE/api/desktop/session/request" \
@@ -63,14 +63,23 @@ echo "  user_id: $USER_ID"
 RESP=$(curl -s -X POST -H "Content-Type: application/json" \
   -d "{\"username\":\"${JSON_USER}\",\"password\":\"jsonpw1234\"}" \
   "$BASE/api/auth/register")
-check "json register has token" "token" "$(echo "$RESP" | json_get token 2>/dev/null || echo "missing")"
-JSON_TOKEN=$(echo "$RESP" | json_get token)
+if echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); raise SystemExit(0 if d.get('token') else 1)" 2>/dev/null; then
+  check "json register has token" "present" "present"
+  JSON_TOKEN=$(echo "$RESP" | json_get token)
+else
+  check "json register has token" "present" "missing"
+  JSON_TOKEN=""
+fi
 
 # /api/auth/login JSON endpoint
 RESP=$(curl -s -X POST -H "Content-Type: application/json" \
   -d "{\"username\":\"${DESKTOP_USER}\",\"password\":\"test1234\"}" \
   "$BASE/api/auth/login")
-check "json login has token" "token" "$(echo "$RESP" | json_get token 2>/dev/null || echo "missing")"
+if echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); raise SystemExit(0 if d.get('token') else 1)" 2>/dev/null; then
+  check "json login has token" "present" "present"
+else
+  check "json login has token" "present" "missing"
+fi
 
 # Invalid credentials rejected
 CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" \
