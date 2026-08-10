@@ -15,6 +15,7 @@ pub mod media;
 pub mod playlist;
 pub mod session;
 pub mod share;
+pub mod ui;
 pub mod upload;
 pub mod videos;
 

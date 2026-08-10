@@ -76,7 +76,7 @@ pub async fn embed(
     let title = html_escape(name.as_deref().unwrap_or("Cap Recording"));
     let src = html_escape(&format!("/s/{video_id}"));
     Ok(Html(format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{title}</title><style>html,body,iframe{{width:100%;height:100%;margin:0;border:0;background:#0b0f19}}iframe{{display:block}}</style></head><body><iframe src="{src}" title="{title}" allow="autoplay; fullscreen" allowfullscreen></iframe></body></html>"#
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{title}</title><style>html,body,iframe{{width:100%;height:100%;margin:0;border:0;background:#f5f5f5}}iframe{{display:block}}</style></head><body><iframe src="{src}" title="{title}" allow="autoplay; fullscreen" allowfullscreen></iframe></body></html>"#
     )))
 }
 

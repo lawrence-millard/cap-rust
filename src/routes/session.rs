@@ -4,6 +4,7 @@ use axum::response::{Html, IntoResponse, Redirect};
 use serde::Deserialize;
 
 use crate::error::ApiError;
+use crate::routes::ui::{self, LOGO_SVG};
 use crate::state::AppState;
 use std::sync::Arc;
 
@@ -124,88 +125,166 @@ fn render_session_page(
     error: Option<&str>,
 ) -> String {
     let error_html = match error {
-        Some(msg) => format!(r#"<div class="error">{}</div>"#, html_escape(msg)),
+        Some(msg) => format!(
+            r#"<div class="error" role="alert">{}</div>"#,
+            ui::html_escape(msg)
+        ),
         None => String::new(),
     };
+    let port_val = port.unwrap_or_default();
     let register_row = if signups {
-        r#"<p class="switch">No account? <a href='#' onclick="show('register');return false;">Create one</a></p>"#.to_string()
+        r##"<p class="switch">Don&#39;t have an account? <a href="#" onclick="show('register');return false;">Sign up here</a></p>"##
+            .to_string()
     } else {
         String::new()
     };
     let register_panel = if signups {
-        r#"<div id="register" class="form hidden">
+        format!(
+            r##"<div id="register" class="form hidden">
   <form method="post" action="/api/desktop/session/request">
     <input type="hidden" name="action" value="register" />
     <input type="hidden" name="port" value="{port_val}" />
-    <input type="text" name="username" placeholder="Username" autocomplete="username" />
-    <input type="password" name="password" placeholder="Password (8+ chars)" autocomplete="new-password" />
+    <label class="field"><span>Username</span>
+      <input type="text" name="username" placeholder="Choose a username" autocomplete="username" required />
+    </label>
+    <label class="field"><span>Password</span>
+      <input type="password" name="password" placeholder="At least 8 characters" autocomplete="new-password" required minlength="8" />
+    </label>
     <button type="submit">Create account &amp; connect</button>
   </form>
-  <p class="switch">Already have an account? <a href='#' onclick="show('login');return false;">Log in</a></p>
-</div>"#.to_string()
+  <p class="switch">Already have an account? <a href="#" onclick="show('login');return false;">Log in</a></p>
+</div>"##,
+            port_val = port_val,
+        )
     } else {
         String::new()
     };
+
+    let css = r##"
+  body {
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    min-height: 100vh;
+  }
+  .card {
+    width: min(400px, 100%);
+    padding: 40px 32px 32px;
+    border-radius: 20px;
+    background: var(--bg-muted);
+    border: 1px solid var(--line);
+    box-shadow: var(--shadow);
+    text-align: center;
+  }
+  .brand {
+    display: grid;
+    place-items: center;
+    gap: 14px;
+    margin-bottom: 28px;
+  }
+  .brand .logo-mark { width: 40px; height: 40px; }
+  h1 {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+  }
+  .subtitle {
+    margin: 6px 0 0;
+    color: var(--ink-soft);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  form { text-align: left; }
+  .field {
+    display: grid;
+    gap: 6px;
+    margin-bottom: 12px;
+  }
+  .field span {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--ink-soft);
+  }
+  input {
+    width: 100%;
+    padding: 12px 14px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--line-strong);
+    background: var(--bg-elevated);
+    color: var(--ink);
+    font: inherit;
+    font-size: 15px;
+    outline: none;
+    transition: border-color .15s ease, box-shadow .15s ease;
+  }
+  input::placeholder { color: var(--ink-faint); }
+  input:focus {
+    border-color: var(--brand);
+    box-shadow: 0 0 0 3px var(--brand-soft);
+  }
+  button {
+    width: 100%;
+    margin-top: 4px;
+    padding: 12px 16px;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: var(--ink);
+    color: #fff;
+    font: inherit;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background .15s ease, transform .06s ease;
+  }
+  button:hover { background: #000; }
+  button:active { transform: translateY(1px); }
+  .switch {
+    margin: 18px 0 0;
+    font-size: 13px;
+    color: var(--ink-soft);
+    text-align: center;
+  }
+  .hidden { display: none; }
+  .error {
+    background: var(--danger-bg);
+    border: 1px solid var(--danger-line);
+    color: var(--danger);
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    margin-bottom: 16px;
+    text-align: left;
+  }
+"##;
+
     format!(
         r##"<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Connect Cap</title>
-<style>
-  :root {{ color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; }}
-  * {{ box-sizing: border-box; }}
-  body {{
-    margin: 0; min-height: 100vh; display: grid; place-items: center;
-    background: linear-gradient(160deg, #0f172a 0%, #1e293b 60%, #2563eb 160%);
-    color: #e2e8f0; padding: 24px;
-  }}
-  .card {{
-    width: min(420px, 100%); padding: 36px 32px; border-radius: 24px;
-    background: rgba(255,255,255,0.06); backdrop-filter: blur(20px);
-    border: 1px solid rgba(255,255,255,0.12);
-    box-shadow: 0 30px 80px rgba(0,0,0,0.5);
-    text-align: center;
-  }}
-  .logo {{
-    width: 64px; height: 64px; margin: 0 auto 18px; border-radius: 18px;
-    background: linear-gradient(135deg, #3b82f6, #8b5cf6);
-    display: grid; place-items: center; font-weight: 800; font-size: 26px; color: white;
-    box-shadow: 0 12px 30px rgba(59,130,246,0.4);
-  }}
-  h1 {{ margin: 0 0 8px; font-size: 24px; }}
-  p {{ margin: 0 0 24px; color: #94a3b8; font-size: 15px; line-height: 1.5; }}
-  input {{
-    width: 100%; padding: 14px 16px; margin-bottom: 12px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.16);
-    background: rgba(255,255,255,0.08); color: #f1f5f9; font-size: 16px; text-align: center; outline: none;
-  }}
-  input:focus {{ border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.3); }}
-  button {{
-    width: 100%; padding: 14px 16px; border: 0; border-radius: 14px;
-    background: linear-gradient(135deg, #3b82f6, #2563eb); color: white; font-size: 16px; font-weight: 700;
-    cursor: pointer; transition: transform .06s ease, box-shadow .15s ease;
-  }}
-  button:hover {{ box-shadow: 0 10px 30px rgba(59,130,246,0.5); transform: translateY(-1px); }}
-  .switch {{ font-size: 14px; margin: 16px 0 0; }}
-  .switch a {{ color: #93c5fd; }}
-  .hidden {{ display: none; }}
-  .error {{ background: rgba(239,68,68,0.15); border: 1px solid rgba(239,68,68,0.3); color: #fca5a5;
-    padding: 10px 14px; border-radius: 12px; font-size: 14px; margin-bottom: 18px; }}
-</style>
+{head}
 </head>
 <body>
 <div class="card">
-  <div class="logo">&#9679;</div>
-  <h1>Connect Cap Desktop</h1>
-  <p>Log in or create an account to authorize this device.</p>
+  <div class="brand">
+    {logo}
+    <div>
+      <h1>Sign in to Cap</h1>
+      <p class="subtitle">Authorize Cap Desktop on this server.</p>
+    </div>
+  </div>
   {error_html}
   <div id="login" class="form">
   <form method="post" action="/api/desktop/session/request">
     <input type="hidden" name="action" value="login" />
     <input type="hidden" name="port" value="{port_val}" />
-    <input type="text" name="username" placeholder="Username" autofocus autocomplete="username" />
-    <input type="password" name="password" placeholder="Password" autocomplete="current-password" />
+    <label class="field"><span>Username</span>
+      <input type="text" name="username" placeholder="Your username" autofocus autocomplete="username" required />
+    </label>
+    <label class="field"><span>Password</span>
+      <input type="password" name="password" placeholder="Your password" autocomplete="current-password" required />
+    </label>
     <button type="submit">Log in &amp; connect</button>
   </form>
   {register_row}
@@ -221,17 +300,11 @@ fn render_session_page(
 </script>
 </body>
 </html>"##,
-        port_val = port.unwrap_or_default(),
+        head = ui::head("Sign in to Cap", css),
+        logo = LOGO_SVG,
+        port_val = port_val,
         error_html = error_html,
         register_row = register_row,
         register_panel = register_panel,
     )
-}
-
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
 }
