@@ -393,7 +393,7 @@ fn render_hls_page(name: &str, src: &str) -> Html<String> {
 <script>
   const video = document.getElementById('video');
   const src = '{src}';
-  if (Hls.isSupported()) {{
+  if (typeof Hls !== 'undefined' && Hls.isSupported()) {{
     const hls = new Hls();
     hls.loadSource(src);
     hls.attachMedia(video);
