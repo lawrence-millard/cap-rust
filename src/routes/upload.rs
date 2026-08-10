@@ -363,13 +363,13 @@ pub async fn signed(
     user: CurrentUser,
     axum::extract::Json(body): axum::extract::Json<SignedRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let backend = verify_video_owned(&state, user.user_id(), &body.video_id).await?;
     let key = file_key(
         user.user_id(),
         Some(&body.video_id),
         Some(&body.subpath),
         None,
     )?;
+    let backend = verify_video_owned(&state, user.user_id(), &body.video_id).await?;
 
     // update video meta if provided
     if body.duration_in_secs.is_some()
@@ -410,12 +410,14 @@ pub async fn signed_batch(
     if body.subpaths.len() > MAX_BATCH {
         return Err(ApiError::BadRequest("batch exceeds 10000 paths".into()));
     }
+    for sub in &body.subpaths {
+        validate_subpath(sub)?;
+    }
     let backend = verify_video_owned(&state, user.user_id(), &body.video_id).await?;
     let mut urls = serde_json::Map::new();
     let mut uploads = serde_json::Map::new();
 
     for sub in &body.subpaths {
-        validate_subpath(sub)?;
         let key = format!("{}/{}/{}", user.user_id(), body.video_id, sub);
         let url = put_url(&state, &backend, &key, PUT_TTL)?;
         urls.insert(sub.clone(), Value::String(url.clone()));

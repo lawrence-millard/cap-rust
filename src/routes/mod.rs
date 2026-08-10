@@ -111,7 +111,10 @@ fn api_router() -> Router<Arc<AppState>> {
         )
         .route("/desktop/video/create", get(desktop::video_create))
         .route("/desktop/video/status", get(desktop::video_status))
-        .route("/desktop/video/delete", delete(desktop::video_delete))
+        .route(
+            "/desktop/video/delete",
+            get(desktop::video_delete).delete(desktop::video_delete),
+        )
         .route("/desktop/video/progress", post(desktop::video_progress))
         .route("/desktop/feedback", post(desktop::feedback))
         .route("/desktop/logs", post(desktop::logs))
