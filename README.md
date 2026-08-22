@@ -4,9 +4,14 @@
 [![Docker](https://github.com/lawrence-millard/cap-rust/actions/workflows/docker.yml/badge.svg)](https://github.com/lawrence-millard/cap-rust/actions/workflows/docker.yml)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 
-Lightweight **1.0** CAP-compatible server in Rust. Cap Desktop can sign in,
-record, upload, share, and play recordings against one service backed by
-Postgres and local disk.
+Self-hosted **Cap-compatible** recording server in Rust. Point
+[Cap Desktop](https://cap.so) at this service to sign in, record, upload, share,
+and play recordings — one process, Postgres, and local disk.
+
+Run it when you want Cap's desktop workflow on your own machine or
+infrastructure instead of Cap's hosted backend. Local: `docker compose up -d`,
+then set Desktop's Cap Server URL to `WEB_URL` (`http://localhost:8080` by
+default). Binary and `cargo` options are in [Quick start](#quick-start).
 
 **1.0 support commitment:** the local-storage Cap Desktop surface (auth, upload,
 share, Instant Mode, collaboration, password access) is stable. Breaking changes
